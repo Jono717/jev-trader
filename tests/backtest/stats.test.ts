@@ -69,7 +69,7 @@ describe("computeStats — Sharpe / Sortino", () => {
     expect(stats.annualizedSortino).toBe(Infinity);
   });
 
-  test("Sortino < Sharpe when negative returns exist", () => {
+  test("Sortino ≥ Sharpe when negative returns exist (only downside is penalised)", () => {
     // Asymmetric: mostly up but one big drop.
     const eq = [1000, 1100, 900, 1050, 1150];
     const stats = computeStats(eq, [], [], 1000, 15, 0);

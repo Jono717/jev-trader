@@ -61,6 +61,37 @@ describe("rsi", () => {
     }
   });
 
+  test("a flat series is neutral (50), not maximally overbought", () => {
+    // No up-moves and no down-moves: avgGain = avgLoss = 0 at the seed and at
+    // every Wilder step, so there is no trend in either direction.
+    const flat = [100, 100, 100, 100, 100];
+    const result = rsi(flat, 2);
+    expect(result[2]).toBe(50); // seed
+    expect(result[3]).toBe(50); // first smoothing step
+    expect(result[4]).toBe(50); // second smoothing step
+  });
+
+  test("a flat stretch following an uptrend keeps the pure-uptrend reading", () => {
+    // Wilder's averages decay geometrically, so avgGain stays strictly above
+    // zero after a real up-move while avgLoss remains zero: still 100, and
+    // the degenerate 0/0 case is never entered.
+    const upThenFlat = [1, 2, 3, 3, 3, 3, 3, 3, 3, 3];
+    const result = rsi(upThenFlat, 2);
+    for (let i = 2; i < result.length; i++) {
+      expect(result[i]).toBe(100);
+    }
+  });
+
+  test("a flat stretch following a downtrend keeps the pure-downtrend reading", () => {
+    // Mirror of the case above on the loss axis: avgGain is zero while
+    // avgLoss decays but stays positive, so the ratio is well defined at 0.
+    const downThenFlat = [3, 2, 2, 2, 2, 2];
+    const result = rsi(downThenFlat, 2);
+    for (let i = 2; i < result.length; i++) {
+      expect(result[i]).toBe(0);
+    }
+  });
+
   test("output length equals input length", () => {
     expect(rsi(CLOSES, 2).length).toBe(CLOSES.length);
   });
@@ -78,6 +109,17 @@ describe("rsi", () => {
         expect(v).toBeLessThanOrEqual(100);
       }
     }
+  });
+
+  test("only a window with up-moves and no down-moves reads 100", () => {
+    const series: Record<string, number[]> = {
+      flat: [5, 5, 5, 5, 5],
+      up: [1, 2, 3, 4, 5],
+      down: [5, 4, 3, 2, 1],
+    };
+    expect(rsi(series.flat!, 2)[4]).toBe(50);
+    expect(rsi(series.up!, 2)[4]).toBe(100);
+    expect(rsi(series.down!, 2)[4]).toBe(0);
   });
 
   test("throws on non-positive period", () => {
