@@ -17,6 +17,11 @@ data/
 *.sqlite-shm
 *.sqlite-wal
 *.db
+*.db-shm
+*.db-wal
+
+# Pi agent local state
+.pi/
 
 # OS
 .DS_Store
