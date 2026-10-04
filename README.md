@@ -122,9 +122,10 @@ const bb = bollingerBands(closes, 20, 2); // BB(20, 2σ)
 const vwap = rollingVwap(bars, 20);       // rolling VWAP + deviation, 20 bars
 ```
 
-Indices without enough data return `undefined` rather than a stand-in value —
-including a VWAP window in which no volume traded, which has no VWAP at all
-(as opposed to a 0 % deviation).
+`ema`, `rsi` and `atr` return `NaN` across their warmup region; the
+object-valued `bollingerBands` and `rollingVwap` return `undefined` instead of
+a stand-in value — including a VWAP window in which no volume traded, which
+has no VWAP at all (as opposed to a 0 % deviation).
 
 ### Backtest engine
 

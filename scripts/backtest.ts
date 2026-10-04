@@ -138,8 +138,8 @@ export function seriesGapWarning(
     `${gaps.length} gap(s), ${totalMissing} bar(s) missing in total.\n` +
     `${lines.join("\n")}\n` +
     `The engine treats consecutive bars as consecutive time steps, so the ` +
-    `annualised Sharpe/Sortino, drawdown and walk-forward window layout below ` +
-    `are computed as if the missing bars did not exist.`
+    `annualised Sharpe/Sortino and drawdown below are computed as if the ` +
+    `missing bars did not exist.`
   );
 }
 
@@ -180,15 +180,23 @@ async function main(): Promise<void> {
   }
 
   const { pair, interval, db: dbPath } = args;
+  const fetchHint =
+    `Run: bun run fetch-ohlcv --pair ${pair} --interval ${interval} --db ${dbPath}`;
 
-  const db = openDb(dbPath);
-  const bars = loadBars(db, pair, interval);
+  let bars: ReturnType<typeof loadBars>;
+  try {
+    bars = loadBars(openDb(dbPath), pair, interval);
+  } catch (err) {
+    console.error(
+      `Could not read ${pair} ${interval}m bars from ${dbPath}: ${String(err)}\n` +
+        fetchHint,
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   if (bars.length === 0) {
-    console.error(
-      `No ${pair} ${interval}m bars found in ${dbPath}.\n` +
-        `Run: bun run fetch-ohlcv --pair ${pair} --interval ${interval} --db ${dbPath}`,
-    );
+    console.error(`No ${pair} ${interval}m bars found in ${dbPath}.\n` + fetchHint);
     process.exitCode = 1;
     return;
   }

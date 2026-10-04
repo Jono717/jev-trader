@@ -32,6 +32,7 @@ import {
 } from "../../src/backtest/walkforward.ts";
 import type { WalkForwardWindow } from "../../src/backtest/walkforward.ts";
 import { computeStats } from "../../src/backtest/stats.ts";
+import { normalCdf } from "../../src/math/normal.ts";
 import type {
   Strategy,
   BacktestConfig,
@@ -287,7 +288,7 @@ describe("deflatedSharpeRatio", () => {
     expect(result.dsr).toBeLessThan(0.01);
   });
 
-  test("K=1 (no multiple-testing penalty): benchmarkSharpe = −Infinity → DSR = 1", () => {
+  test("K=1 (no multiple-testing penalty): SR₀ = 0, DSR = the Probabilistic Sharpe Ratio", () => {
     const result = deflatedSharpeRatio({
       observedSharpe: 0.5,
       numTrials: 1,
@@ -296,8 +297,11 @@ describe("deflatedSharpeRatio", () => {
       skewness: 0,
       excessKurtosis: 0,
     });
-    expect(result.benchmarkSharpe).toBe(-Infinity);
-    expect(result.dsr).toBe(1);
+    expect(result.benchmarkSharpe).toBe(0);
+    expect(result.dsr).toBeCloseTo(
+      normalCdf(0.5 / result.sharpeStdError),
+      10,
+    );
   });
 
   test("large K penalises more: DSR decreases as K increases (same SR)", () => {
@@ -449,5 +453,69 @@ describe("deflatedSharpeRatio — per-observation scale is not saturated", () =>
     // but not the hard 0 the annualised-input mismatch produced.
     expect(dsr).toBeGreaterThan(0);
     expect(dsr).toBeLessThan(0.95);
+  });
+});
+
+describe("deflatedSharpeRatio — a single trial carries no penalty but still judges", () => {
+  // Regression: the extreme-value expression for SR₀ diverges to −∞ at K = 1
+  // (Φ⁻¹(1 − 1/1) = Φ⁻¹(0)), which reported dsr = 1 — maximum confidence — for
+  // every observed Sharpe, including losing ones.  E[max of one standard
+  // normal] is 0, so K = 1 reduces the DSR to Φ(SR / σ_SR).
+  function singleTrial(observedSharpe: number) {
+    return deflatedSharpeRatio({
+      observedSharpe,
+      numTrials: 1,
+      numReturns: 252,
+      trialSharpeVariance: 1,
+      skewness: 0,
+      excessKurtosis: 0,
+    });
+  }
+
+  test("a losing Sharpe is rejected instead of green-lit", () => {
+    const result = singleTrial(-2);
+    expect(result.dsr).toBeLessThan(0.01);
+  });
+
+  test("a strong positive Sharpe is accepted", () => {
+    expect(singleTrial(2).dsr).toBeGreaterThan(0.99);
+  });
+
+  test("SR₀ and the DSR are finite for every supported trial count", () => {
+    for (const k of [1, 2, 3, 10, 1000]) {
+      const result = deflatedSharpeRatio({
+        observedSharpe: 0.6,
+        numTrials: k,
+        numReturns: 252,
+        trialSharpeVariance: 1,
+        skewness: 0,
+        excessKurtosis: 0,
+      });
+      expect(Number.isFinite(result.benchmarkSharpe)).toBe(true);
+      expect(Number.isFinite(result.dsr)).toBe(true);
+    }
+  });
+
+  test("DSR rises monotonically with the observed Sharpe", () => {
+    expect(singleTrial(-1).dsr).toBeLessThan(singleTrial(0).dsr);
+    expect(singleTrial(0).dsr).toBeLessThan(singleTrial(1).dsr);
+  });
+
+  test("one trial is never stricter than two at the same Sharpe", () => {
+    function dsrAt(numTrials: number) {
+      return deflatedSharpeRatio({
+        observedSharpe: 0.6,
+        numTrials,
+        numReturns: 252,
+        trialSharpeVariance: 1,
+        skewness: 0,
+        excessKurtosis: 0,
+      });
+    }
+    const one = dsrAt(1);
+    const two = dsrAt(2);
+    expect(one.benchmarkSharpe).toBe(0);
+    expect(two.benchmarkSharpe).toBeGreaterThan(one.benchmarkSharpe);
+    expect(one.dsr).toBeGreaterThan(two.dsr);
   });
 });

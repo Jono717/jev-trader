@@ -215,7 +215,8 @@ export interface DsrInput {
   observedSharpe: number;
   /**
    * Number of independent strategy variants tested (K).
-   * Must be ≥ 1.  K = 1 means no multiple-testing penalty (DSR → 1).
+   * Must be ≥ 1.  K = 1 carries no multiple-testing penalty: SR₀ = 0 and the
+   * DSR reduces to the Probabilistic Sharpe Ratio Φ(SR / σ_SR).
    */
   numTrials: number;
   /**
@@ -267,12 +268,18 @@ export interface DsrResult {
  * All Sharpe quantities are **per-observation** (per bar), never annualised.
  *
  * Formula:
- *   SR₀   = √V · [(1 − γ) · Φ⁻¹(1 − 1/K) + γ · Φ⁻¹(1 − 1/(K · e))]
+ *   SR₀   = √V · [(1 − γ) · Φ⁻¹(1 − 1/K) + γ · Φ⁻¹(1 − 1/(K · e))]   (K ≥ 2)
+ *   SR₀   = 0                                                     (K = 1)
  *   σ_SR  = √[(1 + SR²/2 − skew · SR + excessKurt · SR²/4) / (T − 1)]
  *   DSR   = Φ[(SR_hat − SR₀) / σ_SR]
  *
  * where γ ≈ 0.5772 is the Euler–Mascheroni constant and V is the variance of
  * the K trials' per-observation Sharpe estimates.
+ *
+ * The extreme-value expression for SR₀ is only valid for K ≥ 2 — at K = 1 it
+ * diverges to −∞, which would report DSR = 1 for any observed Sharpe.  The
+ * expected maximum of a single standard normal is 0, so K = 1 uses SR₀ = 0 and
+ * the result is the Probabilistic Sharpe Ratio.
  *
  * Note on σ_SR: uses the asymptotic variance formula from Mertens (2002) /
  * Lo (2002), which approximates kurtosis as (excessKurtosis + 3) but only
@@ -310,11 +317,13 @@ export function deflatedSharpeRatio(input: DsrInput): DsrResult {
   const EULER_MASCHERONI = 0.5772156649015329;
 
   // ── Benchmark Sharpe SR₀ ─────────────────────────────────────────────
-  const q1 = 1 - 1 / K;           // → 0 when K = 1, giving Φ⁻¹(0) = −∞
+  const q1 = 1 - 1 / K;
   const q2 = 1 - 1 / (K * Math.E);
   const expectedMaxZ =
-    (1 - EULER_MASCHERONI) * normalQuantile(q1) +
-    EULER_MASCHERONI * normalQuantile(q2);
+    K === 1
+      ? 0
+      : (1 - EULER_MASCHERONI) * normalQuantile(q1) +
+        EULER_MASCHERONI * normalQuantile(q2);
   const benchmarkSharpe = Math.sqrt(V) * expectedMaxZ;
 
   // ── Standard error of the observed SR ───────────────────────────────

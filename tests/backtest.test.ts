@@ -120,3 +120,46 @@ describe("seriesGapWarning", () => {
     expect(warning.split("\n").filter((l) => l.startsWith("  •")).length).toBe(3);
   });
 });
+
+// ── CLI store-access failure ──────────────────────────────────────────────────
+
+/**
+ * `bun run backtest` is the first command the README documents, and on a fresh
+ * clone the default `data/` directory does not exist (it is gitignored).
+ * `openDb` cannot create a parent directory, so the first run must report the
+ * actionable fetch-ohlcv hint and exit 1 — not raise an unhandled rejection.
+ *
+ * The contract under test is the CLI's own stderr/exit-code surface, driven
+ * through a real subprocess.
+ */
+describe("backtest CLI — unreadable store", () => {
+  const SCRIPT = new URL("../scripts/backtest.ts", import.meta.url).pathname;
+
+  async function runCli(dbPath: string) {
+    const proc = Bun.spawn(["bun", SCRIPT, "--db", dbPath], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  test("exits 1 with the fetch-ohlcv hint when the parent directory is absent", async () => {
+    const missing = `${import.meta.dir}/_no_such_dir_${Date.now()}/ohlcv.sqlite`;
+    const { stderr, exitCode } = await runCli(missing);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Run: bun run fetch-ohlcv");
+    expect(stderr).toContain(missing);
+  });
+
+  test("the failure is reported, not thrown as an unhandled rejection", async () => {
+    const missing = `${import.meta.dir}/_no_such_dir_${Date.now()}/ohlcv.sqlite`;
+    const { stderr } = await runCli(missing);
+    expect(stderr).not.toContain("Unhandled");
+    expect(stderr).toContain("Could not read");
+  });
+});

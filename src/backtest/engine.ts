@@ -57,8 +57,14 @@ const DEFAULT_MIN_ORDER_COST = 5; // USD — Kraken minimum
  * Order rejection (silent):
  *   - price × volume < minOrderCost
  *   - price ≤ 0 or volume ≤ 0
- *   - buy: estimated total (cost × (1 + makerFee)) > available cash
- *   - sell: requested volume > open position
+ *   - buy: worst-case fill cost (price × (1 + slippage) × volume × (1 + makerFee))
+ *     exceeds the cash not already committed to resting buys
+ *   - sell: requested volume exceeds the position not already committed to
+ *     resting sells
+ *
+ * Reserving the exposure of resting orders is what keeps the engine spot-only:
+ * cash never goes negative and the position is never short, even when a
+ * strategy rests a whole ladder of orders on one bar.
  *
  * At end-of-backtest any unfilled resting orders are discarded; unrealised PnL
  * on open positions is captured in the final equity curve value.
@@ -163,16 +169,36 @@ export function runBacktest(
     const state: EngineState = { cash, position, equity, barIndex: i };
     const intents = strategy.onBar(bar, state);
 
+    let committedCash = 0;
+    let committedVolume = 0;
+    for (const o of resting) {
+      if (o.side === "buy") committedCash += buyCost(o.price, o.volume, fee);
+      else committedVolume += o.volume;
+    }
+
     // ── 4. Validate and queue intents ────────────────────────────────────
     for (const intent of intents) {
-      if (validateIntent(intent, cash, position, fee.makerFee, minOrderCost)) {
-        resting.push({
-          side: intent.side,
-          price: intent.price,
-          volume: intent.volume,
-          tag: intent.tag ?? "",
-          placedBarIndex: i,
-        });
+      const fits = validateIntent(
+        intent,
+        cash - committedCash,
+        position - committedVolume,
+        fee,
+        minOrderCost,
+      );
+      if (!fits) continue;
+
+      resting.push({
+        side: intent.side,
+        price: intent.price,
+        volume: intent.volume,
+        tag: intent.tag ?? "",
+        placedBarIndex: i,
+      });
+
+      if (intent.side === "buy") {
+        committedCash += buyCost(intent.price, intent.volume, fee);
+      } else {
+        committedVolume += intent.volume;
       }
     }
   }
@@ -190,19 +216,26 @@ export function runBacktest(
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
+/**
+ * All-in cash a resting buy consumes when it fills: the slipped fill value
+ * plus the maker fee.  Mirrors the arithmetic of the fill path, so a validated
+ * buy can never cost more than was reserved for it.
+ */
+function buyCost(price: number, volume: number, fee: FeeModel): number {
+  return price * (1 + fee.slippage) * volume * (1 + fee.makerFee);
+}
+
 function validateIntent(
   intent: OrderIntent,
-  cash: number,
-  position: number,
-  makerFee: number,
+  availableCash: number,
+  availablePosition: number,
+  fee: FeeModel,
   minOrderCost: number,
 ): boolean {
   if (intent.price <= 0 || intent.volume <= 0) return false;
-  const cost = intent.price * intent.volume;
-  if (cost < minOrderCost) return false;
+  if (intent.price * intent.volume < minOrderCost) return false;
   if (intent.side === "buy") {
-    // Rough estimate including fee; actual fill may differ due to slippage.
-    return cost * (1 + makerFee) <= cash;
+    return buyCost(intent.price, intent.volume, fee) <= availableCash;
   }
-  return intent.volume <= position;
+  return intent.volume <= availablePosition;
 }
