@@ -207,13 +207,21 @@ import { runWalkForward } from "./src/backtest/walkforward.ts";
 const result = runWalkForward(
   bars,
   (trainBars) => myStrategyFactory(trainBars), // called per window
-  { trainSize: 480, testSize: 240, step: 240 },
+  { trainSize: 240, testSize: 120, step: 120 },
   { initialCash: 1_000, intervalMinutes: 15 },
 );
 
 // result.windows[i].result  — per-window backtest result
 // result.aggregateStats     — combined out-of-sample stats
 ```
+
+The sizes are bar counts, so all three must be **positive integers**. They also
+have to fit the history actually on disk: a single `fetch-ohlcv` run stores at
+most 720 bars, and the layout above needs `trainSize + testSize = 360` bars for
+its first window, reaching 4 windows within 720. A layout no window fits throws
+a `RangeError` naming the bars available versus the bars needed — an aggregate
+over zero windows would otherwise report the same all-zero statistics as a
+strategy that *was* evaluated out of sample and simply never traded.
 
 `step` must be **≥ `testSize`**. A smaller step would overlap consecutive
 out-of-sample spans, counting the same bar returns more than once in

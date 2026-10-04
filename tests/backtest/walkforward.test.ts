@@ -8,6 +8,13 @@
  *   Window 2: start=6, 6+4+3=13 > 10 → skipped
  *   → 2 windows, with non-overlapping test spans [4..6] and [7..9]
  *
+ * A *later* window that runs past the end of `bars` is skipped like window 2
+ * above, but a series too short for even window 0 throws: an aggregate over
+ * zero windows reports the same all-zero statistics as a strategy that was
+ * evaluated out of sample and simply never traded.  All three sizes are bar
+ * counts and must be positive integers, since the reported `trainStart` /
+ * `trainEnd` / `testStart` / `testEnd` are indices into `bars`.
+ *
  * `step` must be ≥ `testSize`: a smaller step overlaps the out-of-sample spans
  * and would count the same bar returns more than once in the aggregate.
  *
@@ -151,14 +158,32 @@ describe("runWalkForward — window layout", () => {
     expect(trainLengths).toEqual([4, 4]);
   });
 
-  test("no windows when bars < trainSize + testSize", () => {
+  test("a series too short for even one window is rejected, not reported as zero", () => {
+    // 5 bars cannot hold trainSize 4 + testSize 3.  An all-zero aggregate here
+    // would be indistinguishable from an evaluated-but-flat strategy.
+    expect(() =>
+      runWalkForward(TEN_BARS.slice(0, 5), factory, LAYOUT, BASE_CONFIG),
+    ).toThrow(RangeError);
+  });
+
+  test("the too-short error names the bars available and the bars needed", () => {
+    expect(() =>
+      runWalkForward(TEN_BARS.slice(0, 5), factory, LAYOUT, BASE_CONFIG),
+    ).toThrow(/5 bar\(s\) available/);
+    expect(() =>
+      runWalkForward(TEN_BARS.slice(0, 5), factory, LAYOUT, BASE_CONFIG),
+    ).toThrow(/4 \+ 3 = 7/);
+  });
+
+  test("exactly trainSize + testSize bars yields one window", () => {
     const result = runWalkForward(
-      TEN_BARS.slice(0, 5),
+      TEN_BARS.slice(0, 7),
       factory,
       LAYOUT,
       BASE_CONFIG,
     );
-    expect(result.windows.length).toBe(0);
+    expect(result.windows.length).toBe(1);
+    expect(result.windows[0]!.testEnd).toBe(7);
   });
 
   test("step = testSize produces the maximum window count", () => {
@@ -196,6 +221,53 @@ describe("runWalkForward — window layout", () => {
         BASE_CONFIG,
       ),
     ).toThrow(RangeError);
+  });
+
+  test("rejects a fractional size instead of truncating the slice", () => {
+    // bars.slice truncates, so trainSize 4.5 silently trained window 0 on 4
+    // bars and window 1 on 5, and reported fractional indices for which
+    // bars[testStart] is undefined.
+    for (const layout of [
+      { trainSize: 4.5, testSize: 3, step: 3 },
+      { trainSize: 4, testSize: 2.5, step: 3 },
+      { trainSize: 4, testSize: 3, step: 3.5 },
+    ]) {
+      expect(() =>
+        runWalkForward(TEN_BARS, factory, layout, BASE_CONFIG),
+      ).toThrow(RangeError);
+    }
+    expect(() =>
+      runWalkForward(
+        TEN_BARS,
+        factory,
+        { trainSize: 4.5, testSize: 3, step: 3 },
+        BASE_CONFIG,
+      ),
+    ).toThrow(/trainSize must be a positive integer/);
+  });
+
+  test("rejects a non-finite size", () => {
+    for (const layout of [
+      { trainSize: Number.NaN, testSize: 3, step: 3 },
+      { trainSize: 4, testSize: Number.POSITIVE_INFINITY, step: 3 },
+    ]) {
+      expect(() =>
+        runWalkForward(TEN_BARS, factory, layout, BASE_CONFIG),
+      ).toThrow(RangeError);
+    }
+  });
+
+  test("every reported boundary is a usable integer index into bars", () => {
+    const result = runWalkForward(TEN_BARS, factory, LAYOUT, BASE_CONFIG);
+    expect(result.windows.length).toBeGreaterThan(0);
+    for (const w of result.windows) {
+      for (const index of [w.trainStart, w.trainEnd, w.testStart, w.testEnd]) {
+        expect(Number.isInteger(index)).toBe(true);
+      }
+      expect(TEN_BARS[w.trainStart]).toBeDefined();
+      expect(TEN_BARS[w.testStart]).toBeDefined();
+      expect(w.testEnd).toBeLessThanOrEqual(TEN_BARS.length);
+    }
   });
 });
 

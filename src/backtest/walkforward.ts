@@ -13,13 +13,17 @@ import { normalCdf, normalQuantile } from "../math/normal.ts";
 
 /** Configuration for the walk-forward evaluation. */
 export interface WalkForwardConfig {
-  /** Number of bars in each training window (used by the strategy factory). */
+  /**
+   * Number of bars in each training window (used by the strategy factory).
+   * Positive integer.
+   */
   trainSize: number;
-  /** Number of bars in each out-of-sample test window. */
+  /** Number of bars in each out-of-sample test window.  Positive integer. */
   testSize: number;
   /**
    * Number of bars to step forward between consecutive windows.
-   * Must be ≥ `testSize` so consecutive out-of-sample spans never overlap.
+   * Positive integer, and must be ≥ `testSize` so consecutive out-of-sample
+   * spans never overlap.
    */
   step: number;
 }
@@ -67,8 +71,16 @@ export type StrategyFactory = (trainBars: readonly OhlcvBar[]) => Strategy;
  *   test  = bars[start + trainSize .. start + trainSize + testSize)
  *   start += step  (repeat while the next window fits within `bars`)
  *
- * Windows that would extend past the end of `bars` are skipped.
+ * Later windows that would extend past the end of `bars` are skipped, but a
+ * layout in which not even the first window fits throws: an all-zero aggregate
+ * over zero windows is indistinguishable from a strategy that was evaluated
+ * out of sample and simply never traded.
+ *
  * The factory is called fresh for each window to simulate true live deployment.
+ *
+ * All three sizes must be positive integers — they are bar counts, and
+ * `trainStart` / `trainEnd` / `testStart` / `testEnd` are reported as indices
+ * into `bars`.
  *
  * `step` must be ≥ `testSize`: a smaller step makes consecutive out-of-sample
  * spans overlap, which would count the same bar returns more than once in
@@ -81,14 +93,31 @@ export function runWalkForward(
   backtestConfig: BacktestConfig,
 ): WalkForwardResult {
   const { trainSize, testSize, step } = wfConfig;
-  if (trainSize < 1 || testSize < 1 || step < 1) {
-    throw new RangeError("trainSize, testSize, and step must all be ≥ 1");
+  for (const [name, value] of [
+    ["trainSize", trainSize],
+    ["testSize", testSize],
+    ["step", step],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new RangeError(
+        `${name} must be a positive integer number of bars, got ${value}`,
+      );
+    }
   }
   if (step < testSize) {
     throw new RangeError(
       `step (${step}) must be ≥ testSize (${testSize}): a smaller step makes ` +
         `out-of-sample test spans overlap, so the same bar returns would be ` +
         `counted more than once in the aggregate out-of-sample stats`,
+    );
+  }
+  if (trainSize + testSize > bars.length) {
+    throw new RangeError(
+      `no walk-forward window fits: ${bars.length} bar(s) available, but one ` +
+        `window needs trainSize + testSize = ${trainSize} + ${testSize} = ` +
+        `${trainSize + testSize}. Fetch more history or shrink the windows — ` +
+        `an aggregate over zero windows would report the same all-zero stats ` +
+        `as a strategy that was evaluated out of sample and never traded.`,
     );
   }
 
