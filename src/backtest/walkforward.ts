@@ -17,7 +17,10 @@ export interface WalkForwardConfig {
   trainSize: number;
   /** Number of bars in each out-of-sample test window. */
   testSize: number;
-  /** Number of bars to step forward between consecutive windows. */
+  /**
+   * Number of bars to step forward between consecutive windows.
+   * Must be ≥ `testSize` so consecutive out-of-sample spans never overlap.
+   */
   step: number;
 }
 
@@ -42,6 +45,9 @@ export interface WalkForwardResult {
    * Aggregate out-of-sample stats: computed from a synthetic equity curve
    * constructed by compounding each window's bar returns in sequence, starting
    * from `initialCash`.  Round-trip PnLs are concatenated across windows.
+   *
+   * `step ≥ testSize` is enforced by `runWalkForward`, so every bar return
+   * enters the aggregate at most once.
    */
   aggregateStats: SummaryStats;
 }
@@ -63,6 +69,10 @@ export type StrategyFactory = (trainBars: readonly OhlcvBar[]) => Strategy;
  *
  * Windows that would extend past the end of `bars` are skipped.
  * The factory is called fresh for each window to simulate true live deployment.
+ *
+ * `step` must be ≥ `testSize`: a smaller step makes consecutive out-of-sample
+ * spans overlap, which would count the same bar returns more than once in
+ * `aggregateStats` and inflate the observation count T that feeds the DSR.
  */
 export function runWalkForward(
   bars: readonly OhlcvBar[],
@@ -73,6 +83,13 @@ export function runWalkForward(
   const { trainSize, testSize, step } = wfConfig;
   if (trainSize < 1 || testSize < 1 || step < 1) {
     throw new RangeError("trainSize, testSize, and step must all be ≥ 1");
+  }
+  if (step < testSize) {
+    throw new RangeError(
+      `step (${step}) must be ≥ testSize (${testSize}): a smaller step makes ` +
+        `out-of-sample test spans overlap, so the same bar returns would be ` +
+        `counted more than once in the aggregate out-of-sample stats`,
+    );
   }
 
   const windows: WalkForwardWindow[] = [];
@@ -118,6 +135,9 @@ export function runWalkForward(
  * Bar returns from each window's test equity curve are concatenated in order.
  * A synthetic equity curve is then reconstructed by compounding those returns
  * starting from `initialCash`.  Round-trip PnLs and fees are pooled directly.
+ *
+ * Assumes non-overlapping test spans (guaranteed by `runWalkForward`'s
+ * `step ≥ testSize` rule) so no bar return is counted twice.
  */
 export function aggregateWindowStats(
   windows: WalkForwardWindow[],
@@ -159,9 +179,39 @@ export function aggregateWindowStats(
 
 // ── Deflated Sharpe Ratio ─────────────────────────────────────────────────────
 
+/**
+ * Convert an annualised Sharpe ratio into the per-observation (per-bar) Sharpe
+ * that `deflatedSharpeRatio` expects.
+ *
+ * `computeStats` annualises with the same 365-day crypto year:
+ *   barsPerYear = 365 × 24 × 60 / intervalMinutes
+ * so the per-bar Sharpe is the annualised value divided by √barsPerYear
+ * (15 m → ÷ √35 040 ≈ ÷ 187.2; 1 h → ÷ √8 760 ≈ ÷ 93.6).
+ */
+export function deannualizeSharpe(
+  annualizedSharpe: number,
+  intervalMinutes: number,
+): number {
+  if (!(intervalMinutes > 0)) {
+    throw new RangeError(
+      `intervalMinutes must be > 0, got ${intervalMinutes}`,
+    );
+  }
+  const barsPerYear = (365 * 24 * 60) / intervalMinutes;
+  return annualizedSharpe / Math.sqrt(barsPerYear);
+}
+
 /** Inputs to the Deflated Sharpe Ratio helper. */
 export interface DsrInput {
-  /** Observed (annualised) Sharpe ratio from the backtest. */
+  /**
+   * Observed **per-observation** (per-bar, non-annualised) Sharpe ratio over
+   * the T returns counted by `numReturns`.
+   *
+   * `SummaryStats.annualizedSharpe` is annualised — pass it through
+   * `deannualizeSharpe` first.  Feeding an annualised value here mixes scales
+   * with `numReturns`, `trialSharpeVariance` and σ_SR, which are all
+   * per-observation quantities.
+   */
   observedSharpe: number;
   /**
    * Number of independent strategy variants tested (K).
@@ -173,6 +223,15 @@ export interface DsrInput {
    * Must be ≥ 2.
    */
   numReturns: number;
+  /**
+   * Variance V of the K trials' **per-observation** Sharpe estimates — the
+   * dispersion of the variants that were tried.  √V scales the
+   * expected-maximum benchmark SR₀, so it sets how much of an edge the best
+   * variant has to show before it beats chance.  Must be finite and > 0.
+   *
+   * For a family of variants whose true edge is zero, V ≈ 1/(T − 1).
+   */
+  trialSharpeVariance: number;
   /** Sample skewness of bar returns. */
   skewness: number;
   /**
@@ -190,9 +249,11 @@ export interface DsrResult {
    * the result of chance across the tested variants.
    */
   dsr: number;
-  /** Expected maximum Sharpe ratio under the null (SR₀). */
+  /** Expected maximum per-observation Sharpe ratio under the null (SR₀). */
   benchmarkSharpe: number;
-  /** Estimated standard error of the observed Sharpe ratio (σ_SR). */
+  /**
+   * Estimated standard error of the observed per-observation Sharpe (σ_SR).
+   */
   sharpeStdError: number;
 }
 
@@ -203,12 +264,15 @@ export interface DsrResult {
  * comparing the observed Sharpe against an expected-maximum benchmark SR₀
  * derived from extreme-value theory.
  *
+ * All Sharpe quantities are **per-observation** (per bar), never annualised.
+ *
  * Formula:
- *   SR₀   = (1 − γ) · Φ⁻¹(1 − 1/K) + γ · Φ⁻¹(1 − 1/(K · e))
+ *   SR₀   = √V · [(1 − γ) · Φ⁻¹(1 − 1/K) + γ · Φ⁻¹(1 − 1/(K · e))]
  *   σ_SR  = √[(1 + SR²/2 − skew · SR + excessKurt · SR²/4) / (T − 1)]
  *   DSR   = Φ[(SR_hat − SR₀) / σ_SR]
  *
- * where γ ≈ 0.5772 is the Euler–Mascheroni constant.
+ * where γ ≈ 0.5772 is the Euler–Mascheroni constant and V is the variance of
+ * the K trials' per-observation Sharpe estimates.
  *
  * Note on σ_SR: uses the asymptotic variance formula from Mertens (2002) /
  * Lo (2002), which approximates kurtosis as (excessKurtosis + 3) but only
@@ -226,6 +290,7 @@ export function deflatedSharpeRatio(input: DsrInput): DsrResult {
     observedSharpe: SR,
     numTrials: K,
     numReturns: T,
+    trialSharpeVariance: V,
     skewness,
     excessKurtosis,
   } = input;
@@ -236,15 +301,21 @@ export function deflatedSharpeRatio(input: DsrInput): DsrResult {
   if (T < 2) {
     throw new RangeError(`numReturns must be ≥ 2, got ${T}`);
   }
+  if (!Number.isFinite(V) || V <= 0) {
+    throw new RangeError(
+      `trialSharpeVariance must be a finite positive number, got ${V}`,
+    );
+  }
 
   const EULER_MASCHERONI = 0.5772156649015329;
 
   // ── Benchmark Sharpe SR₀ ─────────────────────────────────────────────
   const q1 = 1 - 1 / K;           // → 0 when K = 1, giving Φ⁻¹(0) = −∞
   const q2 = 1 - 1 / (K * Math.E);
-  const benchmarkSharpe =
+  const expectedMaxZ =
     (1 - EULER_MASCHERONI) * normalQuantile(q1) +
     EULER_MASCHERONI * normalQuantile(q2);
+  const benchmarkSharpe = Math.sqrt(V) * expectedMaxZ;
 
   // ── Standard error of the observed SR ───────────────────────────────
   const innerVariance =

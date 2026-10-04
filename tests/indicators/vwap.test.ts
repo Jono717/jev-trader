@@ -61,14 +61,21 @@ describe("rollingVwap", () => {
     expect(result[2]).toBeDefined();
   });
 
-  test("zero-volume window falls back to close price, deviation = 0", () => {
+  test("zero-volume window has no VWAP (undefined, not a 0 % deviation)", () => {
     const zeroBars = [
       { high: 10, low: 8, close: 9, volume: 0 },
       { high: 12, low: 10, close: 11, volume: 0 },
     ];
-    const result = rollingVwap(zeroBars, 2);
-    expect(result[1]?.vwap).toBe(11); // fallback to close
-    expect(result[1]?.deviation).toBe(0);
+    expect(rollingVwap(zeroBars, 2)[1]).toBeUndefined();
+  });
+
+  test("a window regains a VWAP as soon as any volume trades", () => {
+    const bars = [
+      { high: 10, low: 8, close: 9, volume: 0 },
+      { high: 12, low: 10, close: 11, volume: 5 },
+    ];
+    // Only bar 1 carries volume: vwap = tp(bar 1) = (12+10+11)/3 = 11.
+    expect(rollingVwap(bars, 2)[1]?.vwap).toBeCloseTo(11, 8);
   });
 
   test("output length equals input length", () => {

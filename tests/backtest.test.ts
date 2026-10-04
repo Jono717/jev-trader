@@ -1,0 +1,122 @@
+/**
+ * Unit tests for the backtest CLI's series-continuity scan.
+ *
+ * The engine treats consecutive array entries as consecutive time steps, and
+ * `loadBars` happily returns a series with holes left by a missed scheduled
+ * `fetch-ohlcv` run.  These tests pin that such a hole is reported before the
+ * backtest runs rather than silently folded into the annualised statistics.
+ *
+ * Run: bun test
+ */
+
+import { test, expect, describe } from "bun:test";
+import { findSeriesGaps, seriesGapWarning } from "../scripts/backtest.ts";
+
+const INTERVAL = 15; // minutes
+const STEP = INTERVAL * 60; // seconds
+const START_TS = 1_700_000_000;
+
+/** A contiguous series of `n` bars starting at `START_TS`. */
+function contiguous(n: number): { ts: number }[] {
+  return Array.from({ length: n }, (_, i) => ({ ts: START_TS + i * STEP }));
+}
+
+describe("findSeriesGaps", () => {
+  test("empty and single-bar series have no gaps", () => {
+    expect(findSeriesGaps([], INTERVAL)).toEqual([]);
+    expect(findSeriesGaps(contiguous(1), INTERVAL)).toEqual([]);
+  });
+
+  test("a contiguous series has no gaps", () => {
+    expect(findSeriesGaps(contiguous(50), INTERVAL)).toEqual([]);
+  });
+
+  test("one missing bar is reported with its position and size", () => {
+    const bars = contiguous(4);
+    bars.splice(2, 1); // drop the bar at START_TS + 2×STEP
+    expect(findSeriesGaps(bars, INTERVAL)).toEqual([
+      {
+        index: 1,
+        fromTs: START_TS + STEP,
+        toTs: START_TS + 3 * STEP,
+        missingBars: 1,
+      },
+    ]);
+  });
+
+  test("a multi-bar hole reports the exact number of absent bars", () => {
+    const bars = [{ ts: START_TS }, { ts: START_TS + 100 * STEP }];
+    const gaps = findSeriesGaps(bars, INTERVAL);
+    expect(gaps.length).toBe(1);
+    expect(gaps[0]!.missingBars).toBe(99);
+  });
+
+  test("every hole in a multi-gap series is reported, in order", () => {
+    const bars = [
+      { ts: START_TS },
+      { ts: START_TS + STEP },
+      { ts: START_TS + 4 * STEP }, // 2 missing
+      { ts: START_TS + 5 * STEP },
+      { ts: START_TS + 9 * STEP }, // 3 missing
+    ];
+    const gaps = findSeriesGaps(bars, INTERVAL);
+    expect(gaps.map((g) => g.missingBars)).toEqual([2, 3]);
+    expect(gaps.map((g) => g.index)).toEqual([1, 3]);
+  });
+
+  test("the interval argument sets what counts as contiguous", () => {
+    // Hourly bars: contiguous at interval 60, a 3-bar hole at interval 15.
+    const hourly = [{ ts: START_TS }, { ts: START_TS + 3600 }];
+    expect(findSeriesGaps(hourly, 60)).toEqual([]);
+    expect(findSeriesGaps(hourly, 15)[0]!.missingBars).toBe(3);
+  });
+
+  test("throws on a non-positive interval", () => {
+    expect(() => findSeriesGaps(contiguous(2), 0)).toThrow(RangeError);
+    expect(() => findSeriesGaps(contiguous(2), -15)).toThrow(RangeError);
+  });
+});
+
+describe("seriesGapWarning", () => {
+  test("returns null for a contiguous series", () => {
+    expect(
+      seriesGapWarning(findSeriesGaps(contiguous(10), INTERVAL), "XBTUSD", INTERVAL),
+    ).toBeNull();
+  });
+
+  test("names the gap count, the total missing bars and both endpoints", () => {
+    const bars = [
+      { ts: START_TS },
+      { ts: START_TS + 3 * STEP }, // 2 missing
+      { ts: START_TS + 8 * STEP }, // 4 missing
+    ];
+    const warning = seriesGapWarning(
+      findSeriesGaps(bars, INTERVAL),
+      "XBTUSD",
+      INTERVAL,
+    );
+    expect(warning).not.toBeNull();
+    expect(warning!).toContain("2 gap(s)");
+    expect(warning!).toContain("6 bar(s) missing in total");
+    expect(warning!).toContain("XBTUSD");
+    expect(warning!).toContain(new Date(START_TS * 1000).toISOString());
+    expect(warning!).toContain(
+      new Date((START_TS + 8 * STEP) * 1000).toISOString(),
+    );
+  });
+
+  test("lists one line per gap", () => {
+    const bars = [
+      { ts: START_TS },
+      { ts: START_TS + 3 * STEP },
+      { ts: START_TS + 8 * STEP },
+      { ts: START_TS + 20 * STEP },
+    ];
+    const warning = seriesGapWarning(
+      findSeriesGaps(bars, INTERVAL),
+      "XBTUSD",
+      INTERVAL,
+    )!;
+    expect(warning.split("\n").filter((l) => l.startsWith("  •")).length).toBe(3);
+  });
+});

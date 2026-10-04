@@ -86,6 +86,14 @@ bun run backtest --db data/eth_1h.sqlite --pair ETHUSD --interval 60
 at 15 m). Run `fetch-ohlcv` on a schedule to grow the series before
 backtesting. See [Notes for later PRs](#notes-for-later-prs).
 
+**Series gaps are reported before the run.** The engine treats consecutive
+bars as consecutive time steps, so a hole left by a missed scheduled fetch
+would silently distort annualised Sharpe/Sortino, drawdown and the
+walk-forward window layout. After loading, the CLI scans the stored timestamps
+and prints a warning naming each gap's position and size. It is a warning
+only — the backtest still runs over the series as stored, and nothing is
+segmented or backfilled.
+
 ### Buy-and-hold reference strategy
 
 The `bun run backtest` CLI runs a trivial buy-and-hold strategy: enter on bar 0
@@ -114,6 +122,10 @@ const bb = bollingerBands(closes, 20, 2); // BB(20, 2σ)
 const vwap = rollingVwap(bars, 20);       // rolling VWAP + deviation, 20 bars
 ```
 
+Indices without enough data return `undefined` rather than a stand-in value —
+including a VWAP window in which no volume traded, which has no VWAP at all
+(as opposed to a 0 % deviation).
+
 ### Backtest engine
 
 ```typescript
@@ -128,7 +140,7 @@ const result = runBacktest(bars, myStrategy, {
 
 console.log(result.stats);
 // result.equityCurve — mark-to-market equity per bar
-// result.trades      — all fills (CSV via tradesToCsv)
+// result.trades      — all fills (CSV via tradesToCsv, RFC 4180 quoting)
 ```
 
 Fill rule (conservative, no lookahead):
@@ -170,23 +182,42 @@ const result = runWalkForward(
 // result.aggregateStats     — combined out-of-sample stats
 ```
 
+`step` must be **≥ `testSize`**. A smaller step would overlap consecutive
+out-of-sample spans, counting the same bar returns more than once in
+`aggregateStats` and inflating the observation count T that feeds the Deflated
+Sharpe Ratio; such a configuration is rejected with a `RangeError`.
+
 ### Deflated Sharpe Ratio
 
 Corrects for selection bias when testing multiple strategy variants
 (Bailey, Borger & Lopez de Prado 2014):
 
 ```typescript
-import { deflatedSharpeRatio } from "./src/backtest/walkforward.ts";
+import { deflatedSharpeRatio, deannualizeSharpe } from "./src/backtest/walkforward.ts";
 
 const { dsr, benchmarkSharpe, sharpeStdError } = deflatedSharpeRatio({
-  observedSharpe: 1.2,  // annualised SR from the out-of-sample test
-  numTrials: 20,        // number of strategy variants tested
-  numReturns: 720,      // number of bar returns
-  skewness: 0,          // bar-return skewness
-  excessKurtosis: 0,    // bar-return excess kurtosis
+  // Per-observation (per-bar) Sharpe — NOT annualised.  `SummaryStats`
+  // reports an annualised figure, so convert it first.
+  observedSharpe: deannualizeSharpe(1.2, 15), // 1.2 annualised on 15 m bars
+  numTrials: 20,               // number of strategy variants tested (K)
+  numReturns: 720,             // number of bar returns (T)
+  trialSharpeVariance: 1 / 719, // variance V of the 20 variants' per-bar SRs
+  skewness: 0,                 // bar-return skewness
+  excessKurtosis: 0,           // bar-return excess kurtosis
 });
 // dsr > 0.95 ⟹ the Sharpe is unlikely to be pure luck
 ```
+
+Every Sharpe quantity here is **per-observation**: the benchmark SR₀ and the
+standard error σ_SR are both computed over `numReturns` bar returns, so feeding
+an annualised Sharpe straight in would mix scales and saturate the test at 0
+or 1. `deannualizeSharpe(sr, intervalMinutes)` divides by `√barsPerYear` using
+the same 365-day crypto year as the summary statistics.
+
+`trialSharpeVariance` is the variance V of the tested variants' per-bar Sharpe
+estimates; `√V` scales SR₀, so it sets how much edge the best variant must
+show before it beats chance. For a family of variants with no real edge,
+V ≈ 1/(T − 1).
 
 ---
 
@@ -294,10 +325,11 @@ src/
     normal.ts             # Standard normal CDF + quantile (used by DSR)
 scripts/
   fetch-ohlcv.ts          # CLI: most recent Kraken OHLC window → SQLite
-  backtest.ts             # CLI: load bars, run reference strategy, print stats
+  backtest.ts             # CLI: load bars, warn on series gaps, run reference strategy, print stats
 tests/
   kraken/client.test.ts   # Unit tests with mocked responses
   fetch-ohlcv.test.ts     # Unit tests for CLI flag validation + series gap detection
+  backtest.test.ts        # Unit tests for the backtest CLI's series-continuity scan
   indicators/
     ema.test.ts           # EMA: hand-computed seed + smoothing
     rsi.test.ts           # RSI: hand-computed Wilder smoothing steps
@@ -305,9 +337,10 @@ tests/
     bollinger.test.ts     # Bollinger: hand-computed mean + population σ
     vwap.test.ts          # VWAP: hand-computed typical price weighting
   backtest/
-    engine.test.ts        # Fill rules, fees, slippage, order rejection
+    engine.test.ts        # Fill rules, fees, slippage, order rejection, buy-and-hold end to end
     stats.test.ts         # totalReturn, maxDD, Sharpe, Sortino, win rate
     walkforward.test.ts   # Window slicing, aggregate stats, DSR reference case
+    csv.test.ts           # RFC 4180 quoting of the trade log
 data/                     # gitignored — SQLite files land here
 ```
 

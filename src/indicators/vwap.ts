@@ -20,8 +20,9 @@ export interface VwapResult {
  * Rolling VWAP = Σ(typicalPrice × volume) / Σ(volume)  over the last `period` bars.
  * VWAP deviation = (close − vwap) / vwap.
  *
- * When the total volume in a window is zero the VWAP falls back to the
- * current bar's close (deviation = 0) so callers always receive a finite value.
+ * When the total volume in a window is zero there is no traded price to
+ * average, so the result is `undefined` — absence of data, not "price exactly
+ * at VWAP".
  *
  * Returns `undefined` for indices before the first full window (0 … period−2).
  */
@@ -46,9 +47,9 @@ export function rollingVwap(
       sumTpV += tp * b.volume;
       sumV += b.volume;
     }
-    const vwap = sumV === 0 ? bars[i]!.close : sumTpV / sumV;
-    const deviation = vwap === 0 ? 0 : (bars[i]!.close - vwap) / vwap;
-    out[i] = { vwap, deviation };
+    if (sumV <= 0 || sumTpV <= 0) continue;
+    const vwap = sumTpV / sumV;
+    out[i] = { vwap, deviation: (bars[i]!.close - vwap) / vwap };
   }
 
   return out;

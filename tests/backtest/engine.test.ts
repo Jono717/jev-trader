@@ -31,6 +31,7 @@
 
 import { test, expect, describe } from "bun:test";
 import { runBacktest } from "../../src/backtest/engine.ts";
+import { createBuyAndHoldStrategy } from "../../src/strategies/buyAndHold.ts";
 import type {
   Strategy,
   OrderIntent,
@@ -292,5 +293,103 @@ describe("runBacktest — slippage", () => {
     const result = runBacktest(BASE_BARS, strategy, slippageConfig);
     const sell = result.trades.find((t) => t.side === "sell");
     expect(sell?.price).toBeCloseTo(110 * (1 - 0.01), 8); // 108.9
+  });
+});
+
+// ── End-to-end: the buy-and-hold reference strategy ───────────────────────────
+
+/**
+ * Four-bar end-to-end run of the reference strategy shipped for engine
+ * validation (and used by `bun run backtest`):
+ *
+ *   bar 0: H=105, L=95,  C=100  → entry limit = 105 × 1.01 = 106.05
+ *   bar 1: H=110, L=85,  C=105  → low 85 ≤ 106.05 → entry fills at 106.05
+ *   bar 2: H=115, L=100, C=110  → (totalBars−2) exit limit = 100 × 0.99 = 99
+ *   bar 3: H=120, L=105, C=118  → high 120 ≥ 99 → exit fills at 99
+ */
+const BAH_BARS: OhlcvBar[] = [
+  makeBar(0, { high: 105, low: 95, close: 100 }),
+  makeBar(1, { high: 110, low: 85, close: 105 }),
+  makeBar(2, { high: 115, low: 100, close: 110 }),
+  makeBar(3, { high: 120, low: 105, close: 118 }),
+];
+
+describe("runBacktest — buy-and-hold reference strategy end to end", () => {
+  function run() {
+    return runBacktest(
+      BAH_BARS,
+      createBuyAndHoldStrategy(BAH_BARS.length),
+      BASE_CONFIG,
+    );
+  }
+
+  test("produces exactly one entry fill and one exit fill, tagged", () => {
+    const { trades } = run();
+    expect(trades.length).toBe(2);
+    expect(trades.map((t) => t.side)).toEqual(["buy", "sell"]);
+    expect(trades.map((t) => t.tag)).toEqual(["bah-entry", "bah-exit"]);
+  });
+
+  test("entry rests on bar 0 and fills on bar 1 at high × (1 + buffer)", () => {
+    const buy = run().trades[0]!;
+    expect(buy.barIndex).toBe(1);
+    expect(buy.price).toBeCloseTo(105 * 1.01, 10);
+  });
+
+  test("exit rests on bar totalBars−2 and fills on the final bar", () => {
+    const sell = run().trades[1]!;
+    expect(sell.barIndex).toBe(BAH_BARS.length - 1);
+    expect(sell.price).toBeCloseTo(100 * 0.99, 10);
+  });
+
+  test("the whole position is exited (buy volume = sell volume)", () => {
+    const trades = run().trades;
+    const buy = trades[0]!;
+    const sell = trades[1]!;
+    expect(sell.volume).toBeCloseTo(buy.volume, 12);
+    expect(buy.volume).toBeGreaterThan(0);
+  });
+
+  test("the entry never spends more than the starting cash", () => {
+    const buy = run().trades[0]!;
+    expect(buy.price * buy.volume + buy.fee).toBeLessThanOrEqual(
+      BASE_CONFIG.initialCash,
+    );
+  });
+
+  test("equity stays positive on every bar and is marked to market", () => {
+    const { equityCurve } = run();
+    expect(equityCurve.length).toBe(BAH_BARS.length);
+    expect(equityCurve[0]).toBe(BASE_CONFIG.initialCash);
+    for (const e of equityCurve) expect(e).toBeGreaterThan(0);
+  });
+
+  test("records one round trip whose PnL matches the two fills", () => {
+    const result = run();
+    const buy = result.trades[0]!;
+    const sell = result.trades[1]!;
+    const expectedPnl =
+      sell.price * sell.volume - sell.fee - (buy.price * buy.volume + buy.fee);
+    expect(result.roundTripPnls.length).toBe(1);
+    expect(result.roundTripPnls[0]).toBeCloseTo(expectedPnl, 8);
+    expect(result.stats.numTrades).toBe(1);
+  });
+
+  test("stats fees equal the sum of both fills' fees", () => {
+    const result = run();
+    const feeSum = result.trades.reduce((s, t) => s + t.fee, 0);
+    expect(result.stats.totalFeesPaid).toBeCloseTo(feeSum, 10);
+  });
+
+  test("final equity equals initial cash plus the round-trip PnL", () => {
+    const result = run();
+    const finalEquity = result.equityCurve[result.equityCurve.length - 1]!;
+    expect(finalEquity).toBeCloseTo(
+      BASE_CONFIG.initialCash + result.roundTripPnls[0]!,
+      6,
+    );
+    // The 1 % entry/exit fill buffers plus maker fees are a structural drag:
+    // the reference strategy is validation-only, not a benchmark.
+    expect(result.stats.totalReturn).toBeLessThan(0);
   });
 });
