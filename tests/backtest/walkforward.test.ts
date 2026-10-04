@@ -31,7 +31,7 @@ import {
   aggregateWindowStats,
 } from "../../src/backtest/walkforward.ts";
 import type { WalkForwardWindow } from "../../src/backtest/walkforward.ts";
-import { computeStats } from "../../src/backtest/stats.ts";
+import { computeStats, barsPerYear } from "../../src/backtest/stats.ts";
 import { normalCdf } from "../../src/math/normal.ts";
 import type {
   Strategy,
@@ -84,7 +84,8 @@ function makeWindow(
       trades: [],
       equityCurve,
       roundTripPnls: [],
-      stats: computeStats(equityCurve, [], [], equityCurve[0]!, 15),
+      rejectedOrders: [],
+      stats: computeStats(equityCurve, [], [], equityCurve[0]!, 15, 0),
     },
   };
 }
@@ -319,7 +320,7 @@ describe("deflatedSharpeRatio", () => {
     expect(dsr(10)).toBeGreaterThan(dsr(100));
   });
 
-  test("positive skewness increases σ_SR (more uncertainty)", () => {
+  test("negative skewness increases σ_SR (more uncertainty)", () => {
     function se(skewness: number) {
       return deflatedSharpeRatio({
         observedSharpe: 1.0,
@@ -517,5 +518,48 @@ describe("deflatedSharpeRatio — a single trial carries no penalty but still ju
     expect(one.benchmarkSharpe).toBe(0);
     expect(two.benchmarkSharpe).toBeGreaterThan(one.benchmarkSharpe);
     expect(one.dsr).toBeGreaterThan(two.dsr);
+  });
+});
+
+// ── Shared annualisation rule ────────────────────────────────────────────────
+
+/**
+ * `barsPerYear` is the sole definition of the 365-day convention: `computeStats`
+ * annualises with it and `deannualizeSharpe` inverts it.  If the two ever used
+ * different constants, the DSR's per-observation scale would silently stop
+ * matching the Sharpe the harness reports.
+ */
+describe("deannualizeSharpe inverts computeStats' annualisation", () => {
+  test("round-trips the reported Sharpe back to its per-bar value", () => {
+    const equity = [1000, 1010, 1005, 1030, 1020, 1060];
+    for (const intervalMinutes of [1, 15, 60, 1440]) {
+      const stats = computeStats(equity, [], [], 1000, intervalMinutes, 0);
+      const perBar = deannualizeSharpe(
+        stats.annualizedSharpe,
+        intervalMinutes,
+      );
+      // Recover the raw mean/σ ratio of the same bar returns.
+      const returns = equity
+        .slice(1)
+        .map((e, i) => e / equity[i]! - 1);
+      const mu = returns.reduce((s, r) => s + r, 0) / returns.length;
+      const variance =
+        returns.reduce((s, r) => s + (r - mu) ** 2, 0) / (returns.length - 1);
+      expect(perBar).toBeCloseTo(mu / Math.sqrt(variance), 10);
+    }
+  });
+
+  test("barsPerYear matches the documented 365-day examples", () => {
+    expect(barsPerYear(15)).toBe(35_040);
+    expect(barsPerYear(60)).toBe(8_760);
+    expect(barsPerYear(1440)).toBe(365);
+  });
+
+  test("both paths reject a non-positive interval at the shared boundary", () => {
+    expect(() => barsPerYear(0)).toThrow(RangeError);
+    expect(() => deannualizeSharpe(1, 0)).toThrow(RangeError);
+    expect(() => computeStats([1000, 1010], [], [], 1000, -15, 0)).toThrow(
+      RangeError,
+    );
   });
 });

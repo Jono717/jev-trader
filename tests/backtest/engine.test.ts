@@ -30,7 +30,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { runBacktest } from "../../src/backtest/engine.ts";
+import { runBacktest, buyCost, fillEconomics } from "../../src/backtest/engine.ts";
 import { createBuyAndHoldStrategy } from "../../src/strategies/buyAndHold.ts";
 import type {
   Strategy,
@@ -182,7 +182,7 @@ describe("runBacktest — equity curve", () => {
 });
 
 describe("runBacktest — order validation / rejection", () => {
-  test("order below minOrderCost is silently rejected", () => {
+  test("order below minOrderCost is rejected and reported", () => {
     // price × volume = 4.99 < $5 default
     const strategy: Strategy = {
       onBar(_bar, state) {
@@ -194,6 +194,9 @@ describe("runBacktest — order validation / rejection", () => {
     };
     const result = runBacktest(BASE_BARS, strategy, BASE_CONFIG);
     expect(result.trades.length).toBe(0);
+    expect(result.rejectedOrders.map((r) => r.reason)).toEqual([
+      "below-min-order-cost",
+    ]);
   });
 
   test("buy exceeding available cash is rejected", () => {
@@ -447,6 +450,130 @@ describe("runBacktest — resting-order exposure is reserved", () => {
     expect(spent).toBeLessThanOrEqual(BASE_CONFIG.initialCash);
   });
 
+  test("the rungs that did not fit are reported, not dropped silently", () => {
+    const result = runBacktest(BASE_BARS, laddersBuys(8, 90, 2), BASE_CONFIG);
+    expect(result.rejectedOrders.length).toBe(3);
+    expect(result.stats.numRejectedOrders).toBe(3);
+    expect(result.rejectedOrders.map((r) => r.reason)).toEqual([
+      "insufficient-available-cash",
+      "insufficient-available-cash",
+      "insufficient-available-cash",
+    ]);
+    // The rejected intents are the exact rungs the strategy asked for.
+    expect(result.rejectedOrders.map((r) => r.intent.tag)).toEqual([
+      "rung-5",
+      "rung-6",
+      "rung-7",
+    ]);
+    expect(result.rejectedOrders.every((r) => r.barIndex === 0)).toBe(true);
+  });
+
+  test("a ladder sized from availableCash places every rung", () => {
+    const rungs = 8;
+    const price = 90;
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        if (state.barIndex !== 0) return [];
+        // Each rung takes an equal slice of what is actually spendable.
+        const budget = (state.availableCash * 0.99) / rungs;
+        const perRung = budget / buyCost(price, 1, state.fee);
+        return Array.from({ length: rungs }, (_, k) => ({
+          side: "buy" as const,
+          price,
+          volume: perRung,
+          tag: `rung-${k}`,
+        }));
+      },
+    };
+    const result = runBacktest(BASE_BARS, strategy, BASE_CONFIG);
+    expect(result.rejectedOrders.length).toBe(0);
+    expect(result.stats.numRejectedOrders).toBe(0);
+    expect(result.trades.length).toBe(rungs);
+    const spent = result.trades.reduce(
+      (s, t) => s + t.price * t.volume + t.fee,
+      0,
+    );
+    expect(spent).toBeLessThanOrEqual(BASE_CONFIG.initialCash);
+    expect(spent).toBeCloseTo(BASE_CONFIG.initialCash * 0.99, 6);
+  });
+
+  test("availableCash shrinks as orders rest and recovers when they fill", () => {
+    const seen: { bar: number; cash: number; available: number }[] = [];
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        seen.push({
+          bar: state.barIndex,
+          cash: state.cash,
+          available: state.availableCash,
+        });
+        if (state.barIndex === 0) {
+          return [{ side: "buy", price: 90, volume: 5 }];
+        }
+        return [];
+      },
+    };
+    runBacktest(BASE_BARS, strategy, BASE_CONFIG);
+    // Bar 0: nothing resting yet, so the two agree.
+    expect(seen[0]!.cash).toBe(1000);
+    expect(seen[0]!.available).toBe(1000);
+    // Bar 1: the buy has filled, so cash dropped and nothing is reserved.
+    expect(seen[1]!.available).toBe(seen[1]!.cash);
+    expect(seen[1]!.cash).toBeCloseTo(1000 - 450 - 0.72, 6);
+  });
+
+  test("availablePosition excludes volume reserved by a resting sell", () => {
+    const seen: { bar: number; position: number; available: number }[] = [];
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        seen.push({
+          bar: state.barIndex,
+          position: state.position,
+          available: state.availablePosition,
+        });
+        if (state.barIndex === 0) {
+          return [{ side: "buy", price: 90, volume: 5 }];
+        }
+        // Rest a sell at a price bar 2 cannot reach, so it stays resting.
+        if (state.barIndex === 1 && state.availablePosition > 0) {
+          return [{ side: "sell", price: 500, volume: state.availablePosition }];
+        }
+        return [];
+      },
+    };
+    runBacktest(BASE_BARS, strategy, BASE_CONFIG);
+    // Bar 1: position 5, nothing reserved yet.
+    expect(seen[1]!.position).toBe(5);
+    expect(seen[1]!.available).toBe(5);
+    // Bar 2: the unfilled sell reserves the whole position.
+    expect(seen[2]!.position).toBe(5);
+    expect(seen[2]!.available).toBe(0);
+  });
+
+  test("each rejection reason is reported distinctly", () => {
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        if (state.barIndex !== 0) return [];
+        return [
+          { side: "buy", price: -1, volume: 1, tag: "bad-price" },
+          { side: "buy", price: 100, volume: 0.001, tag: "too-small" },
+          { side: "buy", price: 100, volume: 100, tag: "too-rich" },
+          { side: "sell", price: 100, volume: 1, tag: "unowned" },
+        ];
+      },
+    };
+    const result = runBacktest(BASE_BARS, strategy, BASE_CONFIG);
+    expect(result.trades.length).toBe(0);
+    expect(
+      result.rejectedOrders.map((r) => [r.intent.tag, r.reason]),
+    ).toEqual([
+      ["bad-price", "invalid"],
+      ["too-small", "below-min-order-cost"],
+      ["too-rich", "insufficient-available-cash"],
+      ["unowned", "insufficient-available-position"],
+    ]);
+    expect(result.stats.numRejectedOrders).toBe(4);
+  });
+
   test("two resting sells of the whole position: only one rests", () => {
     const strategy: Strategy = {
       onBar(_bar, state) {
@@ -466,6 +593,11 @@ describe("runBacktest — resting-order exposure is reserved", () => {
     const sells = result.trades.filter((t) => t.side === "sell");
     expect(sells.length).toBe(1);
     expect(sells[0]!.tag).toBe("exit-a");
+    // The duplicate is reported rather than dropped silently.
+    expect(result.rejectedOrders.map((r) => [r.intent.tag, r.reason])).toEqual([
+      ["exit-b", "insufficient-available-position"],
+    ]);
+    expect(result.stats.numRejectedOrders).toBe(1);
   });
 
   test("the position is never sold short by duplicate resting sells", () => {
@@ -551,5 +683,120 @@ describe("runBacktest — resting-order exposure is reserved", () => {
     const fill = result.trades[0]!;
     expect(fill.price).toBeCloseTo(90 * 1.01, 8);
     expect(fill.price * fill.volume + fill.fee).toBeLessThanOrEqual(100);
+  });
+});
+
+// ── Reservation and fill share one cost rule ─────────────────────────────────
+
+/**
+ * `fillEconomics` is the single definition of how a limit order becomes cash
+ * movement; `buyCost` is derived from it.  If the two ever diverge, the
+ * reservation stops bounding the real outlay and the over-commitment the
+ * reservation exists to prevent reopens.
+ */
+describe("fillEconomics / buyCost", () => {
+  const FEE = { makerFee: 0.0016, takerFee: 0.0026, slippage: 0.02 };
+
+  test("buyCost equals what the engine's buy fill actually spends", () => {
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        if (state.barIndex === 0) return [{ side: "buy", price: 90, volume: 2 }];
+        return [];
+      },
+    };
+    const result = runBacktest(BASE_BARS, strategy, {
+      initialCash: 1000,
+      intervalMinutes: 15,
+      fee: FEE,
+    });
+    const fill = result.trades[0]!;
+    const spent = fill.price * fill.volume + fill.fee;
+    expect(spent).toBeCloseTo(buyCost(90, 2, FEE), 10);
+  });
+
+  test("buyCost is linear in volume, so a unit cost sizes an order exactly", () => {
+    expect(buyCost(90, 7, FEE)).toBeCloseTo(7 * buyCost(90, 1, FEE), 10);
+  });
+
+  test("slippage moves the fill price against each side", () => {
+    expect(fillEconomics("buy", 100, 1, FEE).fillPrice).toBeCloseTo(102, 10);
+    expect(fillEconomics("sell", 100, 1, FEE).fillPrice).toBeCloseTo(98, 10);
+  });
+
+  test("cashDelta is an outlay for a buy and proceeds for a sell", () => {
+    const buy = fillEconomics("buy", 100, 1, FEE);
+    expect(buy.cashDelta).toBeCloseTo(-(buy.fillValue + buy.fee), 10);
+    const sell = fillEconomics("sell", 100, 1, FEE);
+    expect(sell.cashDelta).toBeCloseTo(sell.fillValue - sell.fee, 10);
+  });
+
+  test("a sell fill credits exactly fillValue minus the fee", () => {
+    const strategy: Strategy = {
+      onBar(_bar, state) {
+        if (state.barIndex === 0) return [{ side: "buy", price: 90, volume: 2 }];
+        if (state.barIndex === 1 && state.availablePosition > 0) {
+          return [{ side: "sell", price: 110, volume: state.availablePosition }];
+        }
+        return [];
+      },
+    };
+    const result = runBacktest(BASE_BARS, strategy, {
+      initialCash: 1000,
+      intervalMinutes: 15,
+      fee: FEE,
+    });
+    const sell = result.trades.find((t) => t.side === "sell")!;
+    const econ = fillEconomics("sell", 110, 2, FEE);
+    expect(sell.price).toBeCloseTo(econ.fillPrice, 10);
+    expect(sell.fee).toBeCloseTo(econ.fee, 10);
+  });
+});
+
+// ── Buy-and-hold sizing under configured slippage ────────────────────────────
+
+/**
+ * The reference strategy must size with the engine's own cost rule, so a
+ * configured slippage cannot silently turn the run into a zero-activity report
+ * (no trades, 0 % return, 0 Sharpe) that still looks like a backtest.
+ */
+describe("buy-and-hold reference strategy under slippage", () => {
+  function runWithSlippage(slippage: number) {
+    return runBacktest(BAH_BARS, createBuyAndHoldStrategy(BAH_BARS.length), {
+      initialCash: 1000,
+      intervalMinutes: 15,
+      fee: { slippage },
+    });
+  }
+
+  test("2 % slippage still produces a round trip, not an empty report", () => {
+    const result = runWithSlippage(0.02);
+    expect(result.trades.length).toBe(2);
+    expect(result.rejectedOrders.length).toBe(0);
+    expect(result.stats.numRejectedOrders).toBe(0);
+    expect(result.roundTripPnls.length).toBe(1);
+    expect(result.stats.totalReturn).not.toBe(0);
+  });
+
+  test("the entry never exceeds the cash available to spend", () => {
+    for (const slippage of [0, 0.005, 0.01, 0.02, 0.05]) {
+      const result = runWithSlippage(slippage);
+      const buy = result.trades.find((t) => t.side === "buy");
+      expect(buy).toBeDefined();
+      expect(buy!.price * buy!.volume + buy!.fee).toBeLessThanOrEqual(1000);
+      expect(result.rejectedOrders.length).toBe(0);
+    }
+  });
+
+  test("heavier slippage deploys less base currency", () => {
+    const light = runWithSlippage(0).trades[0]!.volume;
+    const heavy = runWithSlippage(0.05).trades[0]!.volume;
+    expect(heavy).toBeLessThan(light);
+  });
+
+  test("equity stays positive at every configured slippage", () => {
+    for (const slippage of [0, 0.02, 0.05]) {
+      const result = runWithSlippage(slippage);
+      for (const e of result.equityCurve) expect(e).toBeGreaterThan(0);
+    }
   });
 });

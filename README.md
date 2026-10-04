@@ -88,11 +88,10 @@ backtesting. See [Notes for later PRs](#notes-for-later-prs).
 
 **Series gaps are reported before the run.** The engine treats consecutive
 bars as consecutive time steps, so a hole left by a missed scheduled fetch
-would silently distort annualised Sharpe/Sortino, drawdown and the
-walk-forward window layout. After loading, the CLI scans the stored timestamps
-and prints a warning naming each gap's position and size. It is a warning
-only — the backtest still runs over the series as stored, and nothing is
-segmented or backfilled.
+would silently distort the annualised Sharpe/Sortino and drawdown. After
+loading, the CLI scans the stored timestamps and prints a warning naming each
+gap's position and size. It is a warning only — the backtest still runs over
+the series as stored, and nothing is segmented or backfilled.
 
 ### Buy-and-hold reference strategy
 
@@ -140,8 +139,9 @@ const result = runBacktest(bars, myStrategy, {
 });
 
 console.log(result.stats);
-// result.equityCurve — mark-to-market equity per bar
-// result.trades      — all fills (CSV via tradesToCsv, RFC 4180 quoting)
+// result.equityCurve    — mark-to-market equity per bar
+// result.trades         — all fills (CSV via tradesToCsv, RFC 4180 quoting)
+// result.rejectedOrders — intents the engine would not rest, each with a reason
 ```
 
 Fill rule (conservative, no lookahead):
@@ -150,7 +150,34 @@ Fill rule (conservative, no lookahead):
 - Orders placed on bar i cannot fill on bar i.
 
 Fee model: Kraken maker 0.16 % / taker 0.26 % (all limit orders use maker).
-Slippage: configurable, default 0 for limit orders.
+Slippage: configurable, default 0 for limit orders. `fillEconomics` is the
+single definition of how a limit order becomes cash movement, and the
+pre-trade reservation is derived from it, so what the engine reserves can
+never diverge from what a fill actually spends.
+
+**Resting orders reserve their exposure.** The engine is spot-only long/flat,
+so an order may rest only if it fits the balance not already committed to
+orders still resting. `EngineState` therefore exposes both the totals and the
+spendable remainders, plus the resolved fee model, so a strategy sizes against
+exactly what the engine validates:
+
+```typescript
+import { buyCost } from "./src/backtest/engine.ts";
+
+onBar(bar, state) {
+  const price = bar.close;
+  // buyCost prices in slippage and the maker fee, so this order always fits.
+  const volume = (state.availableCash * 0.99) / buyCost(price, 1, state.fee);
+  return [{ side: "buy", price, volume }];
+}
+```
+
+An intent that does not fit is **not** dropped silently: it is appended to
+`result.rejectedOrders` with a reason (`insufficient-available-cash`,
+`insufficient-available-position`, `below-min-order-cost` or `invalid`), and
+`result.stats.numRejectedOrders` counts them. A non-zero count means the
+strategy that ran is not the one configured — the `bun run backtest` CLI prints
+the count and a per-reason breakdown for that reason.
 
 ### Summary statistics
 
@@ -166,6 +193,11 @@ Metrics reported:
 - Total return, annualised Sharpe, annualised Sortino (risk-free rate = 0)
 - Max drawdown (peak-to-trough equity fraction)
 - Win rate, profit factor, number of trades, total fees paid
+- Number of rejected order intents (`numRejectedOrders`)
+
+`barsPerYear(intervalMinutes)` in `src/backtest/stats.ts` is the single
+definition of this rule; `deannualizeSharpe` inverts it, so the DSR's
+per-observation scale can never drift from the annualisation.
 
 ### Walk-forward runner
 

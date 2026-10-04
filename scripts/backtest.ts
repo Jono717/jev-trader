@@ -146,7 +146,7 @@ export function seriesGapWarning(
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 function printStats(result: ReturnType<typeof runBacktest>, pair: string, interval: number): void {
-  const { stats, trades, equityCurve } = result;
+  const { stats, trades, equityCurve, rejectedOrders } = result;
   const finalEquity = equityCurve[equityCurve.length - 1] ?? 0;
 
   console.log(`\n═══ Backtest: ${pair} ${interval}m (buy-and-hold reference) ═══`);
@@ -161,7 +161,22 @@ function printStats(result: ReturnType<typeof runBacktest>, pair: string, interv
   console.log(`  Profit factor     : ${stats.numTrades === 0 ? "N/A" : stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(4)}`);
   console.log(`  Round trips       : ${stats.numTrades}`);
   console.log(`  Total fees paid   : $${stats.totalFeesPaid.toFixed(4)}`);
+  console.log(`  Rejected orders   : ${stats.numRejectedOrders}`);
   console.log(`  ${stats.annualizationNote}`);
+
+  if (rejectedOrders.length > 0) {
+    const byReason = new Map<string, number>();
+    for (const r of rejectedOrders) {
+      byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + 1);
+    }
+    console.warn(
+      `\nWARNING: ${rejectedOrders.length} order intent(s) were not placed, so the ` +
+        `statistics above describe fewer orders than the strategy asked for:`,
+    );
+    for (const [reason, count] of byReason) {
+      console.warn(`  • ${count} × ${reason}`);
+    }
+  }
 
   if (trades.length > 0) {
     console.log("\n─── Trade log ───");

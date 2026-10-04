@@ -43,14 +43,59 @@ export interface TradeRecord {
 
 /** Snapshot of the engine exposed to the strategy on every bar. */
 export interface EngineState {
-  /** Available quote-currency balance after fills on this bar. */
+  /**
+   * Total quote-currency balance after fills on this bar, including the cash
+   * reserved for orders still resting.  Size new buys from `availableCash`.
+   */
   cash: number;
-  /** Open base-currency position (long only; flat = 0). */
+  /**
+   * Quote-currency balance a new buy can actually spend: `cash` minus the
+   * all-in cost reserved for every resting buy.  A buy whose all-in cost
+   * exceeds this is rejected.
+   */
+  availableCash: number;
+  /**
+   * Total open base-currency position (long only; flat = 0), including the
+   * volume reserved for orders still resting.  Size new sells from
+   * `availablePosition`.
+   */
   position: number;
+  /**
+   * Base-currency volume a new sell can actually offer: `position` minus the
+   * volume reserved for every resting sell.  A sell above this is rejected.
+   */
+  availablePosition: number;
   /** Mark-to-market equity: cash + position × bar.close. */
   equity: number;
   /** Zero-based index of the current bar. */
   barIndex: number;
+  /**
+   * Resolved fee / slippage model in force for this run, so a strategy can
+   * size an order with the same all-in cost rule the engine validates against.
+   */
+  fee: Readonly<FeeModel>;
+}
+
+/** Why the engine refused to rest an order intent. */
+export type RejectionReason =
+  /** price ≤ 0 or volume ≤ 0, or either is not a finite number. */
+  | "invalid"
+  /** price × volume is below `BacktestConfig.minOrderCost`. */
+  | "below-min-order-cost"
+  /** All-in buy cost exceeds `EngineState.availableCash`. */
+  | "insufficient-available-cash"
+  /** Sell volume exceeds `EngineState.availablePosition`. */
+  | "insufficient-available-position";
+
+/** An order intent the engine refused to rest, with the reason why. */
+export interface RejectedOrder {
+  /** Zero-based index of the bar on which the intent was returned. */
+  barIndex: number;
+  /** Bar open timestamp (Unix seconds UTC). */
+  ts: number;
+  /** The intent exactly as the strategy returned it. */
+  intent: OrderIntent;
+  reason: RejectionReason;
 }
 
 // ── Strategy ──────────────────────────────────────────────────────────────────
@@ -59,8 +104,10 @@ export interface EngineState {
  * Strategy interface consumed by the backtesting engine.
  *
  * `onBar` is called once per bar in chronological order, after any pending
- * fills have been applied.  Returning invalid intents (below minOrderCost,
- * exceeding cash or position) causes a silent rejection.
+ * fills have been applied.  An intent the engine will not rest (below
+ * `minOrderCost`, or beyond `availableCash` / `availablePosition`) is not
+ * queued, and is recorded in `BacktestResult.rejectedOrders` with its reason
+ * rather than dropped silently.
  */
 export interface Strategy {
   onBar(bar: OhlcvBar, state: Readonly<EngineState>): OrderIntent[];
@@ -99,7 +146,8 @@ export interface BacktestConfig {
   fee?: Partial<FeeModel>;
   /**
    * Minimum order cost (price × volume) in quote currency.
-   * Orders below this threshold are silently rejected.
+   * Orders below this threshold are rejected and reported in
+   * `BacktestResult.rejectedOrders`.
    * Default 5 (Kraken's $5 minimum order cost).
    */
   minOrderCost?: number;
@@ -150,6 +198,12 @@ export interface SummaryStats {
   numTrades: number;
   /** Total maker fees paid across all fills (quote currency). */
   totalFeesPaid: number;
+  /**
+   * Number of order intents the engine refused to rest.  Non-zero means the
+   * strategy that actually ran differs from the one configured, so the other
+   * statistics describe fewer orders than intended.
+   */
+  numRejectedOrders: number;
   /** Human-readable note on the annualisation assumption. */
   annualizationNote: string;
 }
@@ -170,5 +224,11 @@ export interface BacktestResult {
    * in quote currency.  Exposed so walk-forward can aggregate across windows.
    */
   roundTripPnls: number[];
+  /**
+   * Every order intent the engine refused to rest, in the order the strategy
+   * returned them, each with the reason.  `stats.numRejectedOrders` is the
+   * count of this list.
+   */
+  rejectedOrders: RejectedOrder[];
   stats: SummaryStats;
 }

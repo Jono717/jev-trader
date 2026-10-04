@@ -1,5 +1,6 @@
 import type { OhlcvBar } from "../types/index.ts";
 import type { Strategy, OrderIntent, EngineState } from "../backtest/types.ts";
+import { buyCost } from "../backtest/engine.ts";
 
 /**
  * Trivial buy-and-hold reference strategy.
@@ -16,8 +17,9 @@ import type { Strategy, OrderIntent, EngineState } from "../backtest/types.ts";
  *                   to ensure a fill on the final bar.
  *
  * @param totalBars    Total number of bars the strategy will receive.
- * @param cashFraction Fraction of available cash to deploy (default 0.99 to
- *                     leave headroom for the maker fee).
+ * @param cashFraction Fraction of `availableCash` to deploy (default 0.99).
+ *                     Fees and slippage are priced in exactly via `buyCost`,
+ *                     so this is pure headroom, not a fee allowance.
  * @param priceBuffer  Buffer applied to the limit price (default 0.01 = 1 %).
  */
 export function createBuyAndHoldStrategy(
@@ -35,19 +37,21 @@ export function createBuyAndHoldStrategy(
       if (!hasFilled && state.position > 0) hasFilled = true;
 
       // Bar 0: place the entry buy.
-      if (!buyPlaced && state.barIndex === 0 && state.cash > 0) {
+      if (!buyPlaced && state.barIndex === 0 && state.availableCash > 0) {
         buyPlaced = true;
         const limitPrice = bar.high * (1 + priceBuffer);
-        // Allow for maker fee in the volume estimate so the order passes
-        // the cash-check without going over the available balance.
-        const maxVolume =
-          (state.cash * cashFraction) / (limitPrice * 1.0016);
-        if (maxVolume > 0) {
-          return [
-            { side: "buy", price: limitPrice, volume: maxVolume, tag: "bah-entry" },
-          ];
-        }
-        return [];
+        // Size against the engine's own all-in cost rule so the order's
+        // reserved cost never exceeds the cash available to spend.
+        const unitCost = buyCost(limitPrice, 1, state.fee);
+        if (!(unitCost > 0)) return [];
+        return [
+          {
+            side: "buy",
+            price: limitPrice,
+            volume: (state.availableCash * cashFraction) / unitCost,
+            tag: "bah-entry",
+          },
+        ];
       }
 
       // On bar totalBars − 2: queue the exit sell so it can fill on the last bar.
@@ -55,7 +59,7 @@ export function createBuyAndHoldStrategy(
         hasFilled &&
         !sellPlaced &&
         state.barIndex === totalBars - 2 &&
-        state.position > 0
+        state.availablePosition > 0
       ) {
         sellPlaced = true;
         const limitPrice = bar.low * (1 - priceBuffer);
@@ -63,7 +67,7 @@ export function createBuyAndHoldStrategy(
           {
             side: "sell",
             price: limitPrice,
-            volume: state.position,
+            volume: state.availablePosition,
             tag: "bah-exit",
           },
         ];

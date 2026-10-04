@@ -6,7 +6,7 @@ import type {
   BacktestResult,
 } from "./types.ts";
 import { runBacktest } from "./engine.ts";
-import { computeStats } from "./stats.ts";
+import { computeStats, barsPerYear } from "./stats.ts";
 import { normalCdf, normalQuantile } from "../math/normal.ts";
 
 // ── Walk-forward runner ───────────────────────────────────────────────────────
@@ -134,7 +134,8 @@ export function runWalkForward(
  *
  * Bar returns from each window's test equity curve are concatenated in order.
  * A synthetic equity curve is then reconstructed by compounding those returns
- * starting from `initialCash`.  Round-trip PnLs and fees are pooled directly.
+ * starting from `initialCash`.  Round-trip PnLs, fees and rejected-order
+ * counts are pooled directly.
  *
  * Assumes non-overlapping test spans (guaranteed by `runWalkForward`'s
  * `step ≥ testSize` rule) so no bar return is counted twice.
@@ -145,7 +146,7 @@ export function aggregateWindowStats(
   intervalMinutes: number,
 ): SummaryStats {
   if (windows.length === 0) {
-    return computeStats([], [], [], initialCash, intervalMinutes);
+    return computeStats([], [], [], initialCash, intervalMinutes, 0);
   }
 
   // Concatenated out-of-sample bar returns (in chronological order).
@@ -167,6 +168,10 @@ export function aggregateWindowStats(
   // Pool trades and round-trip PnLs.
   const allTrades = windows.flatMap((w) => w.result.trades);
   const allPnls = windows.flatMap((w) => w.result.roundTripPnls);
+  const numRejected = windows.reduce(
+    (s, w) => s + w.result.rejectedOrders.length,
+    0,
+  );
 
   return computeStats(
     syntheticEquity,
@@ -174,6 +179,7 @@ export function aggregateWindowStats(
     allPnls,
     initialCash,
     intervalMinutes,
+    numRejected,
   );
 }
 
@@ -183,22 +189,15 @@ export function aggregateWindowStats(
  * Convert an annualised Sharpe ratio into the per-observation (per-bar) Sharpe
  * that `deflatedSharpeRatio` expects.
  *
- * `computeStats` annualises with the same 365-day crypto year:
- *   barsPerYear = 365 × 24 × 60 / intervalMinutes
- * so the per-bar Sharpe is the annualised value divided by √barsPerYear
- * (15 m → ÷ √35 040 ≈ ÷ 187.2; 1 h → ÷ √8 760 ≈ ÷ 93.6).
+ * `computeStats` annualises with the same 365-day crypto year via the shared
+ * `barsPerYear` helper, so the per-bar Sharpe is the annualised value divided
+ * by √barsPerYear (15 m → ÷ √35 040 ≈ ÷ 187.2; 1 h → ÷ √8 760 ≈ ÷ 93.6).
  */
 export function deannualizeSharpe(
   annualizedSharpe: number,
   intervalMinutes: number,
 ): number {
-  if (!(intervalMinutes > 0)) {
-    throw new RangeError(
-      `intervalMinutes must be > 0, got ${intervalMinutes}`,
-    );
-  }
-  const barsPerYear = (365 * 24 * 60) / intervalMinutes;
-  return annualizedSharpe / Math.sqrt(barsPerYear);
+  return annualizedSharpe / Math.sqrt(barsPerYear(intervalMinutes));
 }
 
 /** Inputs to the Deflated Sharpe Ratio helper. */

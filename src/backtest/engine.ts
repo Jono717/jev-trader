@@ -7,6 +7,8 @@ import type {
   BacktestConfig,
   FeeModel,
   BacktestResult,
+  RejectedOrder,
+  RejectionReason,
 } from "./types.ts";
 import { computeStats } from "./stats.ts";
 
@@ -21,7 +23,7 @@ interface RestingOrder {
 }
 
 interface BuyLot {
-  /** Effective all-in cost per unit: (fillPrice × (1 + slippage) + fee) / volume. */
+  /** Effective all-in cost per unit: (fillValue + fee) / volume. */
   effectiveCostPerUnit: number;
   volume: number;
 }
@@ -54,17 +56,17 @@ const DEFAULT_MIN_ORDER_COST = 5; // USD — Kraken minimum
  * Slippage: buy fill = P × (1 + slippage); sell fill = P × (1 − slippage).
  * All fills use the maker fee (limit orders only).
  *
- * Order rejection (silent):
+ * Order rejection (reported, never silent — see `BacktestResult.rejectedOrders`):
  *   - price × volume < minOrderCost
  *   - price ≤ 0 or volume ≤ 0
- *   - buy: worst-case fill cost (price × (1 + slippage) × volume × (1 + makerFee))
- *     exceeds the cash not already committed to resting buys
- *   - sell: requested volume exceeds the position not already committed to
- *     resting sells
+ *   - buy: all-in fill cost exceeds `EngineState.availableCash`
+ *   - sell: requested volume exceeds `EngineState.availablePosition`
  *
  * Reserving the exposure of resting orders is what keeps the engine spot-only:
  * cash never goes negative and the position is never short, even when a
- * strategy rests a whole ladder of orders on one bar.
+ * strategy rests a whole ladder of orders on one bar.  `EngineState` exposes
+ * the spendable `availableCash` / `availablePosition` so a strategy can size
+ * against the same figures the engine validates against.
  *
  * At end-of-backtest any unfilled resting orders are discarded; unrealised PnL
  * on open positions is captured in the final equity curve value.
@@ -88,6 +90,7 @@ export function runBacktest(
   const equityCurve: number[] = [];
   const buyLots: BuyLot[] = []; // FIFO queue for round-trip PnL tracking
   const roundTripPnls: number[] = [];
+  const rejectedOrders: RejectedOrder[] = [];
 
   for (let i = 0; i < bars.length; i++) {
     const bar = bars[i]!;
@@ -111,29 +114,28 @@ export function runBacktest(
         continue;
       }
 
-      // Apply slippage to get effective fill price.
-      const fillPrice =
-        order.side === "buy"
-          ? order.price * (1 + fee.slippage)
-          : order.price * (1 - fee.slippage);
-
-      const fillValue = fillPrice * order.volume;
-      const filledFee = fillValue * fee.makerFee;
+      const econ = fillEconomics(
+        order.side,
+        order.price,
+        order.volume,
+        fee,
+      );
+      cash += econ.cashDelta;
 
       if (order.side === "buy") {
-        cash -= fillValue + filledFee;
         position += order.volume;
 
         // Track cost basis for FIFO round-trip PnL matching.
-        const costPerUnit = (fillValue + filledFee) / order.volume;
-        buyLots.push({ effectiveCostPerUnit: costPerUnit, volume: order.volume });
+        buyLots.push({
+          effectiveCostPerUnit: -econ.cashDelta / order.volume,
+          volume: order.volume,
+        });
       } else {
-        cash += fillValue - filledFee;
         position -= order.volume;
         if (position < 0) position = 0; // guard floating-point drift
 
         // FIFO-match against buy lots for round-trip PnL tracking.
-        const netProceedsPerUnit = (fillValue - filledFee) / order.volume;
+        const netProceedsPerUnit = econ.cashDelta / order.volume;
         let remaining = order.volume;
         while (remaining > 1e-12 && buyLots.length > 0) {
           const lot = buyLots[0]!;
@@ -151,9 +153,9 @@ export function runBacktest(
         barIndex: i,
         ts: bar.ts,
         side: order.side,
-        price: fillPrice,
+        price: econ.fillPrice,
         volume: order.volume,
-        fee: filledFee,
+        fee: econ.fee,
         tag: order.tag,
       });
     }
@@ -166,26 +168,37 @@ export function runBacktest(
     equityCurve.push(equity);
 
     // ── 3. Strategy call ─────────────────────────────────────────────────
-    const state: EngineState = { cash, position, equity, barIndex: i };
-    const intents = strategy.onBar(bar, state);
-
-    let committedCash = 0;
-    let committedVolume = 0;
+    let availableCash = cash;
+    let availablePosition = position;
     for (const o of resting) {
-      if (o.side === "buy") committedCash += buyCost(o.price, o.volume, fee);
-      else committedVolume += o.volume;
+      if (o.side === "buy") availableCash -= buyCost(o.price, o.volume, fee);
+      else availablePosition -= o.volume;
     }
+
+    const state: EngineState = {
+      cash,
+      availableCash,
+      position,
+      availablePosition,
+      equity,
+      barIndex: i,
+      fee,
+    };
+    const intents = strategy.onBar(bar, state);
 
     // ── 4. Validate and queue intents ────────────────────────────────────
     for (const intent of intents) {
-      const fits = validateIntent(
+      const reason = rejectionReason(
         intent,
-        cash - committedCash,
-        position - committedVolume,
+        availableCash,
+        availablePosition,
         fee,
         minOrderCost,
       );
-      if (!fits) continue;
+      if (reason !== null) {
+        rejectedOrders.push({ barIndex: i, ts: bar.ts, intent, reason });
+        continue;
+      }
 
       resting.push({
         side: intent.side,
@@ -196,9 +209,9 @@ export function runBacktest(
       });
 
       if (intent.side === "buy") {
-        committedCash += buyCost(intent.price, intent.volume, fee);
+        availableCash -= buyCost(intent.price, intent.volume, fee);
       } else {
-        committedVolume += intent.volume;
+        availablePosition -= intent.volume;
       }
     }
   }
@@ -209,33 +222,89 @@ export function runBacktest(
     roundTripPnls,
     config.initialCash,
     config.intervalMinutes,
+    rejectedOrders.length,
   );
 
-  return { trades, equityCurve, roundTripPnls, stats };
+  return { trades, equityCurve, roundTripPnls, rejectedOrders, stats };
+}
+
+// ── Fill economics ────────────────────────────────────────────────────────────
+
+/** What a fill of `volume` at limit `price` actually does to the account. */
+export interface FillEconomics {
+  /** Effective fill price after slippage. */
+  fillPrice: number;
+  /** fillPrice × volume, before fees. */
+  fillValue: number;
+  /** Maker fee paid on the fill value. */
+  fee: number;
+  /** Change in cash: negative for a buy outlay, positive for sell proceeds. */
+  cashDelta: number;
+}
+
+/**
+ * The single definition of how a limit order converts into cash movement:
+ * slippage moves the fill price against the order, and the maker fee is taken
+ * on the resulting fill value.  Both the fill path and the pre-trade
+ * reservation derive from this, so what is reserved can never diverge from
+ * what is spent.
+ */
+export function fillEconomics(
+  side: "buy" | "sell",
+  price: number,
+  volume: number,
+  fee: FeeModel,
+): FillEconomics {
+  const fillPrice =
+    side === "buy" ? price * (1 + fee.slippage) : price * (1 - fee.slippage);
+  const fillValue = fillPrice * volume;
+  const feePaid = fillValue * fee.makerFee;
+  return {
+    fillPrice,
+    fillValue,
+    fee: feePaid,
+    cashDelta: side === "buy" ? -(fillValue + feePaid) : fillValue - feePaid,
+  };
+}
+
+/**
+ * All-in cash a buy of `volume` at limit `price` consumes when it fills.
+ * This is the figure the engine reserves and validates against
+ * `EngineState.availableCash`, so a strategy sizing an order should divide its
+ * budget by `buyCost(price, 1, fee)`.
+ */
+export function buyCost(price: number, volume: number, fee: FeeModel): number {
+  return -fillEconomics("buy", price, volume, fee).cashDelta;
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
 /**
- * All-in cash a resting buy consumes when it fills: the slipped fill value
- * plus the maker fee.  Mirrors the arithmetic of the fill path, so a validated
- * buy can never cost more than was reserved for it.
+ * Why `intent` cannot rest, or `null` when it can.  Balances passed in are the
+ * spendable remainders, already net of every order resting at this point.
  */
-function buyCost(price: number, volume: number, fee: FeeModel): number {
-  return price * (1 + fee.slippage) * volume * (1 + fee.makerFee);
-}
-
-function validateIntent(
+function rejectionReason(
   intent: OrderIntent,
   availableCash: number,
   availablePosition: number,
   fee: FeeModel,
   minOrderCost: number,
-): boolean {
-  if (intent.price <= 0 || intent.volume <= 0) return false;
-  if (intent.price * intent.volume < minOrderCost) return false;
-  if (intent.side === "buy") {
-    return buyCost(intent.price, intent.volume, fee) <= availableCash;
+): RejectionReason | null {
+  if (
+    !Number.isFinite(intent.price) ||
+    !Number.isFinite(intent.volume) ||
+    intent.price <= 0 ||
+    intent.volume <= 0
+  ) {
+    return "invalid";
   }
-  return intent.volume <= availablePosition;
+  if (intent.price * intent.volume < minOrderCost) return "below-min-order-cost";
+  if (intent.side === "buy") {
+    return buyCost(intent.price, intent.volume, fee) <= availableCash
+      ? null
+      : "insufficient-available-cash";
+  }
+  return intent.volume <= availablePosition
+    ? null
+    : "insufficient-available-position";
 }

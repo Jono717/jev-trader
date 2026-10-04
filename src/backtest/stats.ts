@@ -1,12 +1,27 @@
 import type { TradeRecord, SummaryStats } from "./types.ts";
 
 /**
- * Compute summary statistics from a completed backtest.
+ * Bars per year under the project's single annualisation convention: crypto
+ * markets trade 24 / 7, so a 365-day year is assumed.
  *
- * Annualisation uses a 365-day year — crypto markets trade 24 / 7:
  *   barsPerYear = 365 × 24 × 60 / intervalMinutes
  *
  * Examples: 15 m → 35 040 bars/year; 1 h → 8 760; 1 d → 365.
+ *
+ * Sole definition of the rule: `computeStats` annualises with it and
+ * `deannualizeSharpe` inverts it, so the two can never drift apart.
+ */
+export function barsPerYear(intervalMinutes: number): number {
+  if (!(intervalMinutes > 0)) {
+    throw new RangeError(`intervalMinutes must be > 0, got ${intervalMinutes}`);
+  }
+  return (365 * 24 * 60) / intervalMinutes;
+}
+
+/**
+ * Compute summary statistics from a completed backtest.
+ *
+ * Annualisation uses `barsPerYear(intervalMinutes)` — a 365-day year.
  *
  * Bar returns: r_i = E_i / E_{i−1} − 1 (length = equityCurve.length − 1).
  * Risk-free rate = 0 for both Sharpe and Sortino.
@@ -17,17 +32,17 @@ export function computeStats(
   roundTripPnls: readonly number[],
   initialCash: number,
   intervalMinutes: number,
+  numRejectedOrders: number,
 ): SummaryStats {
   const n = equityCurve.length;
   const finalEquity = n > 0 ? equityCurve[n - 1]! : initialCash;
   const totalReturn = (finalEquity - initialCash) / initialCash;
 
-  // 365-day year, continuous 24/7 crypto trading.
-  const barsPerYear = (365 * 24 * 60) / intervalMinutes;
+  const barsPerYearValue = barsPerYear(intervalMinutes);
   const annualizationNote =
     `Annualisation: 365-day year, continuous 24/7 crypto trading. ` +
-    `barsPerYear = 365 × 24 × 60 / ${intervalMinutes} = ${barsPerYear.toFixed(2)}. ` +
-    `Annualisation factor = √${barsPerYear.toFixed(2)} ≈ ${Math.sqrt(barsPerYear).toFixed(4)}. ` +
+    `barsPerYear = 365 × 24 × 60 / ${intervalMinutes} = ${barsPerYearValue.toFixed(2)}. ` +
+    `Annualisation factor = √${barsPerYearValue.toFixed(2)} ≈ ${Math.sqrt(barsPerYearValue).toFixed(4)}. ` +
     `Risk-free rate = 0.`;
 
   // Bar returns (length n − 1).
@@ -37,8 +52,8 @@ export function computeStats(
     if (prev !== 0) returns.push(equityCurve[i]! / prev - 1);
   }
 
-  const annualizedSharpe = computeSharpe(returns, barsPerYear);
-  const annualizedSortino = computeSortino(returns, barsPerYear);
+  const annualizedSharpe = computeSharpe(returns, barsPerYearValue);
+  const annualizedSortino = computeSortino(returns, barsPerYearValue);
   const maxDrawdown = computeMaxDrawdown(equityCurve);
 
   // Round-trip statistics.
@@ -67,6 +82,7 @@ export function computeStats(
     profitFactor,
     numTrades,
     totalFeesPaid,
+    numRejectedOrders,
     annualizationNote,
   };
 }
