@@ -101,14 +101,15 @@ export class KrakenPublicClient {
   }
 
   /**
-   * GET /0/public/OHLC — returns up to 720 OHLC bars.
+   * GET /0/public/OHLC — returns up to 720 of the most recent OHLC bars.
+   * Older data cannot be retrieved through this endpoint, whatever `since` is.
    *
    * @param pair     Kraken pair name, e.g. "XBTUSD"
    * @param interval Bar width in minutes (1|5|15|30|60|240|1440|10080|21600)
    * @param since    Return bars at or after this Unix timestamp (optional)
    *
    * @returns `bars` — the bar array (raw Kraken strings for prices);
-   *          `last` — timestamp to pass as `since` for the next page
+   *          `last` — Kraken's cursor for polling newly committed bars
    */
   async getOhlc(
     pair: string,

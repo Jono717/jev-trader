@@ -80,21 +80,35 @@ bun run fetch-ohlcv --pair ETHUSD --interval 60
 bun run fetch-ohlcv --db data/eth_1h.sqlite --pair ETHUSD --interval 60
 ```
 
-**Re-runs are idempotent.** The script resumes from the most recently stored bar
-timestamp; existing rows are updated in-place with `INSERT OR REPLACE`.
+**Re-runs are idempotent.** Each run stores the most recent window Kraken will
+serve; existing rows are updated in-place with `INSERT OR REPLACE`, and the
+latest stored bar is re-fetched so a bar that was still forming gets its final
+values.
 
 ### Kraken OHLC 720-bar limit
 
-Kraken's public `/0/public/OHLC` endpoint returns **at most 720 bars per
-request**. At 15-minute bars that covers roughly **7.5 days** per page. The
-fetch script pages forward (using the `last` cursor returned by each response)
-to retrieve up to 180 days of history, but there is no way to reach data older
-than that via this endpoint.
+Kraken's public `/0/public/OHLC` endpoint returns **at most 720 of the most
+recent bars**, and older data cannot be retrieved regardless of the `since`
+parameter. That fixes the reachable history at 720 x interval:
 
-For deeper historical data, Kraken publishes downloadable OHLCVT CSV files at
-<https://support.kraken.com/hc/en-us/articles/360047124832>. A CSV importer
-(reading those files into the same `ohlcv_bars` table) is planned for a later
-PR once it is confirmed whether the backtesting harness needs the extra depth.
+| Interval | History reachable in one run |
+|----------|------------------------------|
+| 15 m | ~7.5 days |
+| 1 h | ~30 days |
+| 4 h | ~120 days |
+| 1 d | ~720 days |
+
+So at the default 15-minute bars this repository can only accumulate about
+**7.5 days** of history per run — and if `fetch-ohlcv` is not run for longer
+than that window, the intervening bars are gone for good. When that happens the
+script prints a warning naming how many bars are missing instead of silently
+storing a discontinuous series; it does not attempt a backfill.
+
+Running the fetch on a schedule (PR 6) is what grows the series beyond one
+window. For history deeper than the scheduler has been running, Kraken
+publishes downloadable OHLCVT CSV files at
+<https://support.kraken.com/hc/en-us/articles/360047124832>. A CSV importer and
+gap backfill are later work, not part of PR 1.
 
 ---
 
@@ -125,9 +139,10 @@ src/
     client.ts             # Public REST client (Time, AssetPairs, OHLC)
   storage/db.ts           # bun:sqlite helpers (open, upsert, query)
 scripts/
-  fetch-ohlcv.ts          # CLI: page Kraken OHLC → SQLite
+  fetch-ohlcv.ts          # CLI: most recent Kraken OHLC window → SQLite
 tests/
   kraken/client.test.ts   # Unit tests with mocked responses
+  fetch-ohlcv.test.ts     # Unit tests for series gap detection
 data/                     # gitignored — SQLite files land here
 ```
 
@@ -148,6 +163,8 @@ Items observed during PR 1 that belong in future work:
 - **PR 6 / Mac mini service:** A `launchd` plist for `bun run fetch-ohlcv`
   on a schedule, log rotation, and the alerting webhook are deployment
   concerns for the final PR.
-- **Deeper history:** Evaluate whether the backtesting harness needs more than
-  180 days; if so, build the Kraken CSV importer before parameter optimisation
-  to avoid overfitting to a short window.
+- **Deeper history:** A single `fetch-ohlcv` run can only reach the most recent
+  720 bars (~7.5 days at 15 m). Before parameter optimisation, decide whether
+  the backtesting harness needs more depth than a scheduled fetch has
+  accumulated; if it does, build the Kraken OHLCVT CSV importer (and a backfill
+  for the gaps `fetch-ohlcv` reports) to avoid overfitting to a short window.

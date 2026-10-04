@@ -22,8 +22,11 @@ export interface OhlcvBar {
 /** Direction of a trade or order. */
 export type Side = "buy" | "sell";
 
-/** Exchange order type (limit orders are the default for grid trading). */
-export type OrderType = "limit" | "market";
+/**
+ * Exchange order type. Limit-only by design: every entry and exit rests on the
+ * order book (see README, "Design philosophy").
+ */
+export type OrderType = "limit";
 
 /** Lifecycle state of an order as tracked locally. */
 export type OrderStatus =
@@ -43,7 +46,7 @@ export interface Order {
   pair: string;
   side: Side;
   type: OrderType;
-  price: number; // limit price; 0 for market orders
+  price: number; // limit price
   volume: number; // base-currency volume requested
   filledVolume: number;
   remainingVolume: number;
@@ -69,11 +72,11 @@ export interface Fill {
 /**
  * Aggregated open position in a trading pair.
  * Used by the risk manager and grid strategy in later PRs.
- * Side "flat" means no open position.
+ * Spot-only: a position is either long or flat — "flat" means no open position.
  */
 export interface Position {
   pair: string;
-  side: "long" | "short" | "flat";
+  side: "long" | "flat";
   volume: number;
   avgEntryPrice: number;
   unrealizedPnl: number;
