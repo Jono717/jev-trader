@@ -317,7 +317,7 @@ Running the fetch on a schedule (PR 6) is what grows the series beyond one
 window. For history deeper than the scheduler has been running, Kraken
 publishes downloadable OHLCVT CSV files at
 <https://support.kraken.com/hc/en-us/articles/360047124832>. A CSV importer and
-gap backfill are later work, not part of PR 1.
+gap backfill remain later work — see [Notes for later PRs](#notes-for-later-prs).
 
 ---
 
@@ -389,11 +389,8 @@ data/                     # gitignored — SQLite files land here
 
 ## Notes for later PRs
 
-Items observed during PR 1 that belong in future work:
+Items observed so far that belong in future work:
 
-- **PR 2 / backtesting:** The `KrakenOhlcBar` tuple keeps prices as strings
-  (Kraken sends them that way); the backtesting engine should own the
-  `Number()` conversion and precision handling.
 - **PR 4+ / websocket:** Kraken's authenticated WebSocket v2 feeds real-time
   order book and own-trade events. The public client here is REST-only.
 - **PR 5 / authenticated client:** `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`

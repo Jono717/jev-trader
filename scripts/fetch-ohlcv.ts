@@ -155,6 +155,9 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Kraken sends OHLC prices and volumes as strings; the ingest boundary owns
+  // the conversion so everything downstream (SQLite REAL columns, loadBars,
+  // the backtest engine) only ever sees numbers.
   const ohlcv: OhlcvBar[] = rawBars.map(
     ([ts, open, high, low, close, vwap, volume, count]) => ({
       pair,
