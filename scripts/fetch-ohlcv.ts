@@ -21,19 +21,20 @@
 
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { KrakenPublicClient } from "../src/kraken/client.ts";
-import { openDb, upsertBars, countBars, getLatestTimestamp } from "../src/storage/db.ts";
+import { KrakenPublicClient, KRAKEN_OHLC_INTERVALS } from "../src/kraken/client.ts";
+import {
+  openDb,
+  upsertBars,
+  countBars,
+  getLatestTimestamp,
+  countMissingBars,
+} from "../src/storage/db.ts";
 import type { OhlcvBar } from "../src/types/index.ts";
 
 /** Hard ceiling Kraken's public OHLC endpoint applies to every response. */
 export const MAX_BARS_PER_REQUEST = 720;
 
 // ── CLI argument parsing ──────────────────────────────────────────────────────
-
-/** Bar widths, in minutes, that Kraken's OHLC endpoint accepts. */
-const VALID_INTERVALS: readonly number[] = [
-  1, 5, 15, 30, 60, 240, 1440, 10080, 21600,
-];
 
 const USAGE =
   "Usage: bun run fetch-ohlcv [--pair XBTUSD] [--interval 15] [--db data/ohlcv.sqlite]";
@@ -68,9 +69,9 @@ export function parseArgs(argv: string[]): {
       args.pair = val;
     } else if (flag === "--interval") {
       const interval = Number(val);
-      if (!VALID_INTERVALS.includes(interval)) {
+      if (!KRAKEN_OHLC_INTERVALS.includes(interval)) {
         throw new Error(
-          `Invalid --interval ${val}. Kraken serves only: ${VALID_INTERVALS.join(", ")}.`,
+          `Invalid --interval ${val}. Kraken serves only: ${KRAKEN_OHLC_INTERVALS.join(", ")}.`,
         );
       }
       args.interval = interval;
@@ -86,19 +87,6 @@ export function parseArgs(argv: string[]): {
 }
 
 // ── Series continuity ─────────────────────────────────────────────────────────
-
-/**
- * Number of bars absent between the latest stored bar and the earliest bar this
- * fetch returned. Zero when the series stays contiguous.
- */
-export function countMissingBars(
-  latestStoredTs: number,
-  earliestReturnedTs: number,
-  intervalMinutes: number,
-): number {
-  const step = intervalMinutes * 60;
-  return Math.max(0, Math.floor((earliestReturnedTs - latestStoredTs) / step) - 1);
-}
 
 /**
  * Human-readable warning for a discontinuity in the stored series, or `null`
@@ -167,6 +155,9 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Kraken sends OHLC prices and volumes as strings; the ingest boundary owns
+  // the conversion so everything downstream (SQLite REAL columns, loadBars,
+  // the backtest engine) only ever sees numbers.
   const ohlcv: OhlcvBar[] = rawBars.map(
     ([ts, open, high, low, close, vwap, volume, count]) => ({
       pair,
