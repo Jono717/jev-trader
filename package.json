@@ -1,0 +1,16 @@
+{
+  "name": "jev-trader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch-ohlcv": "bun run scripts/fetch-ohlcv.ts",
+    "test": "bun test",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5",
+    "undici-types": "^8.11.2"
+  }
+}
