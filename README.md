@@ -146,7 +146,7 @@ scripts/
   fetch-ohlcv.ts          # CLI: most recent Kraken OHLC window → SQLite
 tests/
   kraken/client.test.ts   # Unit tests with mocked responses
-  fetch-ohlcv.test.ts     # Unit tests for series gap detection
+  fetch-ohlcv.test.ts     # Unit tests for CLI flag validation + series gap detection
 data/                     # gitignored — SQLite files land here
 ```
 
