@@ -87,6 +87,25 @@ export function countBars(
 }
 
 /**
+ * Return all stored OHLCV bars for a pair+interval, ordered by ts ASC.
+ * Returns an empty array when no bars are stored yet.
+ */
+export function loadBars(
+  db: Database,
+  pair: string,
+  interval: number,
+): OhlcvBar[] {
+  return db
+    .query<OhlcvBar, [string, number]>(
+      `SELECT pair, interval, ts, open, high, low, close, vwap, volume, count
+       FROM ohlcv_bars
+       WHERE pair = ? AND interval = ?
+       ORDER BY ts ASC`,
+    )
+    .all(pair, interval);
+}
+
+/**
  * Return the timestamp of the most recently stored bar for a pair+interval,
  * or `null` if no bars are stored yet.
  */
