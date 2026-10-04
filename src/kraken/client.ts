@@ -26,6 +26,11 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Thrown when Kraken returns a non-empty `error` array. */
+/** Bar widths, in minutes, that Kraken's OHLC endpoint accepts. */
+export const KRAKEN_OHLC_INTERVALS: readonly number[] = [
+  1, 5, 15, 30, 60, 240, 1440, 10080, 21600,
+];
+
 export class KrakenError extends Error {
   public readonly krakenErrors: string[];
 

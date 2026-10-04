@@ -120,6 +120,27 @@ describe("computeStats — win rate & profit factor", () => {
     expect(stats.profitFactor).toBeCloseTo(4, 8);
     expect(stats.numTrades).toBe(3);
   });
+
+  test("round trips that all netted exactly zero report 0, not Infinity", () => {
+    // grossGain and grossLoss are both 0.  Infinity would contradict the
+    // winRate of 0 reported beside it and read as the best possible outcome.
+    const stats = computeStats([1000, 1000], [], [0, 0], 1000, 15, 0);
+    expect(stats.numTrades).toBe(2);
+    expect(stats.winRate).toBe(0);
+    expect(stats.profitFactor).toBe(0);
+  });
+
+  test("Infinity still means wins with no losses at all", () => {
+    const stats = computeStats([1000, 1100], [], [50, 25], 1000, 15, 0);
+    expect(stats.winRate).toBe(1);
+    expect(stats.profitFactor).toBe(Infinity);
+  });
+
+  test("a zero-netting round trip beside a real loss is not Infinity", () => {
+    const stats = computeStats([1000, 950], [], [0, -50], 1000, 15, 0);
+    expect(stats.winRate).toBe(0);
+    expect(stats.profitFactor).toBe(0);
+  });
 });
 
 describe("computeStats — totalFeesPaid", () => {

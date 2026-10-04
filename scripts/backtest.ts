@@ -22,7 +22,8 @@
  * not a real trading strategy.
  */
 
-import { openDb, loadBars } from "../src/storage/db.ts";
+import { openDb, loadBars, countMissingBars } from "../src/storage/db.ts";
+import { KRAKEN_OHLC_INTERVALS } from "../src/kraken/client.ts";
 import { runBacktest } from "../src/backtest/engine.ts";
 import { tradesToCsv } from "../src/backtest/csv.ts";
 import { createBuyAndHoldStrategy } from "../src/strategies/buyAndHold.ts";
@@ -30,14 +31,10 @@ import type { BacktestConfig } from "../src/backtest/types.ts";
 
 // ── CLI argument parsing ──────────────────────────────────────────────────────
 
-const VALID_INTERVALS: readonly number[] = [
-  1, 5, 15, 30, 60, 240, 1440, 10080, 21600,
-];
-
 const USAGE =
   "Usage: bun run backtest [--pair XBTUSD] [--interval 15] [--db data/ohlcv.sqlite]";
 
-function parseArgs(argv: string[]): {
+export function parseArgs(argv: string[]): {
   pair: string;
   interval: number;
   db: string;
@@ -59,8 +56,8 @@ function parseArgs(argv: string[]): {
       args.pair = val;
     } else if (flag === "--interval") {
       const n = Number(val);
-      if (!VALID_INTERVALS.includes(n)) {
-        throw new Error(`Invalid --interval ${val}. Valid: ${VALID_INTERVALS.join(", ")}`);
+      if (!KRAKEN_OHLC_INTERVALS.includes(n)) {
+        throw new Error(`Invalid --interval ${val}. Valid: ${KRAKEN_OHLC_INTERVALS.join(", ")}`);
       }
       args.interval = n;
     } else {
@@ -92,6 +89,9 @@ export interface SeriesGap {
  * hole left by a missed `fetch-ohlcv` run silently distorts annualised stats
  * and the walk-forward window layout.  Returns one entry per gap in
  * chronological order; an empty array when the series is contiguous.
+ *
+ * Gap size comes from `countMissingBars`, the same contiguity rule
+ * `fetch-ohlcv` applies at the seam of a freshly fetched window.
  */
 export function findSeriesGaps(
   bars: readonly { ts: number }[],
@@ -100,13 +100,12 @@ export function findSeriesGaps(
   if (!(intervalMinutes > 0)) {
     throw new RangeError(`intervalMinutes must be > 0, got ${intervalMinutes}`);
   }
-  const step = intervalMinutes * 60;
   const gaps: SeriesGap[] = [];
 
   for (let i = 1; i < bars.length; i++) {
     const fromTs = bars[i - 1]!.ts;
     const toTs = bars[i]!.ts;
-    const missingBars = Math.floor((toTs - fromTs) / step) - 1;
+    const missingBars = countMissingBars(fromTs, toTs, intervalMinutes);
     if (missingBars > 0) gaps.push({ index: i - 1, fromTs, toTs, missingBars });
   }
 

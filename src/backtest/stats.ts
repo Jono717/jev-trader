@@ -70,7 +70,12 @@ export function computeStats(
 
     const grossGain = wins.reduce((s, p) => s + p, 0);
     const grossLoss = losses.reduce((s, p) => s + Math.abs(p), 0);
-    profitFactor = grossLoss === 0 ? Infinity : grossGain / grossLoss;
+    profitFactor =
+      grossGain === 0
+        ? 0
+        : grossLoss === 0
+          ? Infinity
+          : grossGain / grossLoss;
   }
 
   return {

@@ -10,7 +10,14 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { findSeriesGaps, seriesGapWarning } from "../scripts/backtest.ts";
+import {
+  findSeriesGaps,
+  seriesGapWarning,
+  parseArgs as backtestParseArgs,
+} from "../scripts/backtest.ts";
+import { parseArgs as fetchParseArgs } from "../scripts/fetch-ohlcv.ts";
+import { countMissingBars } from "../src/storage/db.ts";
+import { KRAKEN_OHLC_INTERVALS } from "../src/kraken/client.ts";
 
 const INTERVAL = 15; // minutes
 const STEP = INTERVAL * 60; // seconds
@@ -161,5 +168,79 @@ describe("backtest CLI — unreadable store", () => {
     const { stderr } = await runCli(missing);
     expect(stderr).not.toContain("Unhandled");
     expect(stderr).toContain("Could not read");
+  });
+});
+
+// ── One definition of the Kraken interval set ────────────────────────────────
+
+/**
+ * Both CLIs annualise and store against the same series, so an interval one
+ * accepts and the other rejects would let `bun run backtest` annualise against
+ * a bar width no stored series uses.  The expected set below is an independent
+ * oracle for the documented Kraken OHLC parameter domain.
+ */
+describe("backtest and fetch-ohlcv agree on the accepted intervals", () => {
+  const KRAKEN_INTERVALS = [1, 5, 15, 30, 60, 240, 1440, 10080, 21600];
+  const NOT_SERVED = [2, 7, 45, 90, 120, 360, 720, 43200];
+
+  test("the shared constant is exactly the documented Kraken set", () => {
+    expect([...KRAKEN_OHLC_INTERVALS]).toEqual(KRAKEN_INTERVALS);
+  });
+
+  test("every served interval is accepted by both CLIs", () => {
+    for (const minutes of KRAKEN_INTERVALS) {
+      expect(
+        backtestParseArgs(["--interval", String(minutes)]).interval,
+      ).toBe(minutes);
+      expect(
+        fetchParseArgs(["--interval", String(minutes)]).interval,
+      ).toBe(minutes);
+    }
+  });
+
+  test("every unserved interval is rejected by both CLIs", () => {
+    for (const minutes of NOT_SERVED) {
+      expect(() =>
+        backtestParseArgs(["--interval", String(minutes)]),
+      ).toThrow(/Invalid --interval/);
+      expect(() =>
+        fetchParseArgs(["--interval", String(minutes)]),
+      ).toThrow(/Invalid --interval/);
+    }
+  });
+});
+
+// ── One definition of the contiguity rule ────────────────────────────────────
+
+/**
+ * `findSeriesGaps` (backtest CLI, adjacent loaded bars) and `countMissingBars`
+ * (fetch-ohlcv, the seam of a freshly fetched window) must report the same gap
+ * size for the same discontinuity, or the two CLIs would disagree about the
+ * same database.
+ */
+describe("findSeriesGaps and countMissingBars report the same gap size", () => {
+  test("agree across a range of hole sizes and intervals", () => {
+    for (const interval of [1, 15, 60, 1440]) {
+      const step = interval * 60;
+      for (const skipped of [0, 1, 2, 5, 99, 800]) {
+        const fromTs = START_TS;
+        const toTs = START_TS + (skipped + 1) * step;
+        const viaScan = findSeriesGaps([{ ts: fromTs }, { ts: toTs }], interval);
+        const viaSeam = countMissingBars(fromTs, toTs, interval);
+        expect(viaSeam).toBe(skipped);
+        if (skipped === 0) {
+          expect(viaScan).toEqual([]);
+        } else {
+          expect(viaScan[0]!.missingBars).toBe(viaSeam);
+        }
+      }
+    }
+  });
+
+  test("neither reports a gap for a non-advancing timestamp", () => {
+    expect(countMissingBars(START_TS, START_TS, INTERVAL)).toBe(0);
+    expect(findSeriesGaps([{ ts: START_TS }, { ts: START_TS }], INTERVAL)).toEqual(
+      [],
+    );
   });
 });

@@ -106,6 +106,23 @@ export function loadBars(
 }
 
 /**
+ * Number of bars absent between two timestamps in a series of `intervalMinutes`
+ * bars.  Zero when the two are adjacent, identical, or out of order.
+ *
+ * Sole definition of the contiguity rule: `fetch-ohlcv` applies it to the seam
+ * between the stored series and a freshly fetched window, and the backtest
+ * CLI's gap scan applies it to every adjacent pair of loaded bars.
+ */
+export function countMissingBars(
+  earlierTs: number,
+  laterTs: number,
+  intervalMinutes: number,
+): number {
+  const step = intervalMinutes * 60;
+  return Math.max(0, Math.floor((laterTs - earlierTs) / step) - 1);
+}
+
+/**
  * Return the timestamp of the most recently stored bar for a pair+interval,
  * or `null` if no bars are stored yet.
  */

@@ -32,6 +32,7 @@
 import { test, expect, describe } from "bun:test";
 import { runBacktest, buyCost, fillEconomics } from "../../src/backtest/engine.ts";
 import { createBuyAndHoldStrategy } from "../../src/strategies/buyAndHold.ts";
+import { runWalkForward } from "../../src/backtest/walkforward.ts";
 import type {
   Strategy,
   OrderIntent,
@@ -798,5 +799,100 @@ describe("buy-and-hold reference strategy under slippage", () => {
       const result = runWithSlippage(slippage);
       for (const e of result.equityCurve) expect(e).toBeGreaterThan(0);
     }
+  });
+});
+
+// ── Resolved-config validation ───────────────────────────────────────────────
+
+/**
+ * Fees and slippage are fractions.  A percent/fraction mix-up used to invert
+ * the sell side: `slippage: 2` gave `fillPrice = 99 × (1 − 2) = −99`, so the
+ * exit *removed* cash and the run reported a negative equity curve and a
+ * 129.7 % drawdown without erroring.  The engine now rejects a configuration
+ * outside the domain its arithmetic can honour.
+ */
+describe("runBacktest — resolved config validation", () => {
+  function run(config: Partial<BacktestConfig>) {
+    return runBacktest(BAH_BARS, createBuyAndHoldStrategy(BAH_BARS.length), {
+      initialCash: 1000,
+      intervalMinutes: 15,
+      ...config,
+    });
+  }
+
+  test("a percent-for-fraction slippage is rejected, not silently inverted", () => {
+    expect(() => run({ fee: { slippage: 2 } })).toThrow(RangeError);
+    expect(() => run({ fee: { slippage: 2 } })).toThrow(/fee\.slippage/);
+    expect(() => run({ fee: { slippage: 1 } })).toThrow(RangeError);
+  });
+
+  test("negative slippage is rejected (it would fill better than the limit)", () => {
+    expect(() => run({ fee: { slippage: -0.5 } })).toThrow(RangeError);
+  });
+
+  test("a negative fee is rejected (it would rebate every fill)", () => {
+    expect(() => run({ fee: { makerFee: -0.01 } })).toThrow(/fee\.makerFee/);
+    expect(() => run({ fee: { takerFee: -0.01 } })).toThrow(/fee\.takerFee/);
+  });
+
+  test("a fee of 100 % or more is rejected (a sell would remove cash)", () => {
+    expect(() => run({ fee: { makerFee: 1 } })).toThrow(RangeError);
+    expect(() => run({ fee: { makerFee: 2 } })).toThrow(RangeError);
+  });
+
+  test("a non-finite fee field is rejected", () => {
+    expect(() => run({ fee: { slippage: Number.NaN } })).toThrow(RangeError);
+    expect(() => run({ fee: { makerFee: Number.POSITIVE_INFINITY } })).toThrow(
+      RangeError,
+    );
+  });
+
+  test("a negative or non-finite minOrderCost is rejected", () => {
+    expect(() => run({ minOrderCost: -5 })).toThrow(/minOrderCost/);
+    expect(() => run({ minOrderCost: Number.NaN })).toThrow(RangeError);
+  });
+
+  test("minOrderCost of exactly 0 is allowed (no floor)", () => {
+    expect(() => run({ minOrderCost: 0 })).not.toThrow();
+  });
+
+  test("a non-positive or non-finite initialCash is rejected", () => {
+    expect(() => run({ initialCash: 0 })).toThrow(/initialCash/);
+    expect(() => run({ initialCash: -1000 })).toThrow(RangeError);
+    expect(() => run({ initialCash: Number.NaN })).toThrow(RangeError);
+  });
+
+  test("the Kraken defaults and the documented knobs still run", () => {
+    expect(() => run({})).not.toThrow();
+    expect(() =>
+      run({ fee: { makerFee: 0.0016, takerFee: 0.0026, slippage: 0 } }),
+    ).not.toThrow();
+    expect(() => run({ fee: { makerFee: 0, slippage: 0 } })).not.toThrow();
+    expect(() => run({ fee: { slippage: 0.02 } })).not.toThrow();
+  });
+
+  test("across every accepted fee config, equity and drawdown stay in domain", () => {
+    for (const makerFee of [0, 0.0016, 0.0026, 0.5, 0.999]) {
+      for (const slippage of [0, 0.01, 0.02, 0.5, 0.999]) {
+        const result = run({ fee: { makerFee, slippage } });
+        for (const e of result.equityCurve) {
+          expect(e).toBeGreaterThanOrEqual(0);
+        }
+        expect(result.stats.maxDrawdown).toBeGreaterThanOrEqual(0);
+        expect(result.stats.maxDrawdown).toBeLessThanOrEqual(1);
+        expect(Number.isFinite(result.stats.totalReturn)).toBe(true);
+      }
+    }
+  });
+
+  test("the walk-forward runner rejects the same config, per window", () => {
+    expect(() =>
+      runWalkForward(
+        BAH_BARS,
+        () => createBuyAndHoldStrategy(2),
+        { trainSize: 1, testSize: 2, step: 2 },
+        { initialCash: 1000, intervalMinutes: 15, fee: { slippage: 2 } },
+      ),
+    ).toThrow(RangeError);
   });
 });

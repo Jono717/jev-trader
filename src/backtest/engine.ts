@@ -70,6 +70,11 @@ const DEFAULT_MIN_ORDER_COST = 5; // USD — Kraken minimum
  *
  * At end-of-backtest any unfilled resting orders are discarded; unrealised PnL
  * on open positions is captured in the final equity curve value.
+ *
+ * Throws `RangeError` when the resolved configuration falls outside the domain
+ * this arithmetic assumes — see `validateRunConfig`.  A percent/fraction unit
+ * mix-up (`slippage: 2` meaning 2 %) would otherwise invert the sell side and
+ * report a negative-equity curve as a result.
  */
 export function runBacktest(
   bars: readonly OhlcvBar[],
@@ -82,6 +87,7 @@ export function runBacktest(
     slippage: config.fee?.slippage ?? DEFAULT_FEE.slippage,
   };
   const minOrderCost = config.minOrderCost ?? DEFAULT_MIN_ORDER_COST;
+  validateRunConfig(config.initialCash, fee, minOrderCost);
 
   let cash = config.initialCash;
   let position = 0;
@@ -278,6 +284,46 @@ export function buyCost(price: number, volume: number, fee: FeeModel): number {
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
+
+/**
+ * Reject a resolved configuration the engine's arithmetic cannot honour.
+ *
+ * Fees and slippage are **fractions**, not percentages.  Keeping slippage and
+ * the fees strictly below 1 is what makes a sell always credit cash
+ * (`fillValue × (1 − makerFee)` with `fillPrice = price × (1 − slippage)`), and
+ * keeping them at or above 0 is what stops a fill landing better than its own
+ * limit price.  Together with the resting-order reservation this is what keeps
+ * the documented spot-only guarantee true: cash never goes negative, the
+ * position is never short, and so equity never goes negative either.
+ */
+function validateRunConfig(
+  initialCash: number,
+  fee: FeeModel,
+  minOrderCost: number,
+): void {
+  if (!Number.isFinite(initialCash) || initialCash <= 0) {
+    throw new RangeError(
+      `initialCash must be a finite number > 0, got ${initialCash}`,
+    );
+  }
+  for (const [name, value] of [
+    ["fee.makerFee", fee.makerFee],
+    ["fee.takerFee", fee.takerFee],
+    ["fee.slippage", fee.slippage],
+  ] as const) {
+    if (!Number.isFinite(value) || value < 0 || value >= 1) {
+      throw new RangeError(
+        `${name} must be a finite fraction in [0, 1), got ${value} ` +
+          `(fees and slippage are fractions, so 0.16 % is 0.0016)`,
+      );
+    }
+  }
+  if (!Number.isFinite(minOrderCost) || minOrderCost < 0) {
+    throw new RangeError(
+      `minOrderCost must be a finite number ≥ 0, got ${minOrderCost}`,
+    );
+  }
+}
 
 /**
  * Why `intent` cannot rest, or `null` when it can.  Balances passed in are the

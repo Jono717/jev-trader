@@ -191,7 +191,8 @@ export interface SummaryStats {
   winRate: number;
   /**
    * Gross gain / gross loss across all round trips.
-   * Returns Infinity when there are no losing trades.
+   * Infinity means wins with no losses at all; 0 means no gross gain, so a
+   * window whose round trips all netted exactly zero reports 0, not Infinity.
    */
   profitFactor: number;
   /** Number of completed round-trip trades. */
