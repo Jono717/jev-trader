@@ -30,27 +30,56 @@ export const MAX_BARS_PER_REQUEST = 720;
 
 // ── CLI argument parsing ──────────────────────────────────────────────────────
 
-function parseArgs(argv: string[]): {
+/** Bar widths, in minutes, that Kraken's OHLC endpoint accepts. */
+const VALID_INTERVALS: readonly number[] = [
+  1, 5, 15, 30, 60, 240, 1440, 10080, 21600,
+];
+
+const USAGE =
+  "Usage: bun run fetch-ohlcv [--pair XBTUSD] [--interval 15] [--db data/ohlcv.sqlite]";
+
+/**
+ * Parse the documented flags. Throws on an unrecognised flag, a flag without a
+ * value, or an interval Kraken does not serve, so a typo can never be mistaken
+ * for a default.
+ */
+export function parseArgs(argv: string[]): {
   pair: string;
   interval: number;
   db: string;
 } {
   const args = { pair: "XBTUSD", interval: 15, db: "data/ohlcv.sqlite" };
-  for (let i = 0; i < argv.length - 1; i++) {
-    const flag = argv[i];
+
+  for (let i = 0; i < argv.length; i += 2) {
+    const flag = argv[i]!;
     const val = argv[i + 1];
-    if (val === undefined) break;
+    if (val === undefined) {
+      throw new Error(`Missing value for ${flag}. ${USAGE}`);
+    }
+
     if (flag === "--pair") {
+      if (val.length === 0) {
+        throw new Error(`--pair needs a Kraken pair name. ${USAGE}`);
+      }
       args.pair = val;
-      i++;
     } else if (flag === "--interval") {
-      args.interval = Number(val);
-      i++;
+      const interval = Number(val);
+      if (!VALID_INTERVALS.includes(interval)) {
+        throw new Error(
+          `Invalid --interval ${val}. Kraken serves only: ${VALID_INTERVALS.join(", ")}.`,
+        );
+      }
+      args.interval = interval;
     } else if (flag === "--db") {
+      if (val.length === 0) {
+        throw new Error(`--db needs a file path. ${USAGE}`);
+      }
       args.db = val;
-      i++;
+    } else {
+      throw new Error(`Unknown flag ${flag}. ${USAGE}`);
     }
   }
+
   return args;
 }
 
@@ -124,7 +153,15 @@ async function main(): Promise<void> {
   const { bars: rawBars } = await client.getOhlc(pair, interval, since);
 
   if (rawBars.length === 0) {
-    console.log("No bars returned — already up to date.");
+    if (latestStored === null) {
+      console.error(
+        `Kraken returned no OHLC bars for ${pair} ${interval}m — nothing was ` +
+          "stored. Check that the pair name and interval are ones Kraken lists.",
+      );
+      process.exitCode = 1;
+      return;
+    }
+    console.log("No new bars returned — already up to date.");
     return;
   }
 

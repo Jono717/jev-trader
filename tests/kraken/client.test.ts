@@ -7,7 +7,7 @@
  * Run: bun test
  */
 
-import { test, expect, mock, describe, beforeEach } from "bun:test";
+import { test, expect, mock, describe, beforeEach, afterEach } from "bun:test";
 import { KrakenPublicClient, KrakenError } from "../../src/kraken/client.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -74,10 +74,24 @@ const ERROR_FIXTURE = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Replace global fetch with a mock that returns the given body once. */
-function mockFetch(body: unknown, status = 200): void {
+/** The real fetch, captured before any test replaces it. */
+const ORIGINAL_FETCH = globalThis.fetch;
+
+/**
+ * Single place that replaces global fetch, so the `afterEach` below is the only
+ * restore path needed. Keeping the live smoke tests at the bottom working
+ * depends on nothing leaking past a test.
+ */
+function installFetch(
+  handler: (input: unknown, init?: RequestInit) => Promise<Response>,
+): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).fetch = mock(
+  (globalThis as any).fetch = mock(handler);
+}
+
+/** Replace global fetch with a mock that returns the given body. */
+function mockFetch(body: unknown, status = 200): void {
+  installFetch(
     async () =>
       new Response(JSON.stringify(body), {
         status,
@@ -85,6 +99,11 @@ function mockFetch(body: unknown, status = 200): void {
       }),
   );
 }
+
+afterEach(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (globalThis as any).fetch = ORIGINAL_FETCH;
+});
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -118,16 +137,13 @@ describe("KrakenPublicClient", () => {
 
   test("getAssetPairs passes no query param when called without args", async () => {
     let capturedUrl = "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = mock(
-      async (input: unknown) => {
-        capturedUrl = String(input);
-        return new Response(JSON.stringify(ASSET_PAIRS_FIXTURE), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    );
+    installFetch(async (input) => {
+      capturedUrl = String(input);
+      return new Response(JSON.stringify(ASSET_PAIRS_FIXTURE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
     await client.getAssetPairs();
     expect(capturedUrl).not.toContain("pair=");
   });
@@ -151,18 +167,47 @@ describe("KrakenPublicClient", () => {
     expect(last).toBe(1_699_999_200);
   });
 
+  test("getOhlc prefers the requested pair key when Kraken returns both spellings", async () => {
+    mockFetch({
+      error: [],
+      result: {
+        XXBTZUSD: [
+          [1_600_000_000, "1.0", "1.0", "1.0", "1.0", "1.0", "1.0", 1],
+        ],
+        XBTUSD: [
+          [1_699_999_200, "36500.0", "36700.0", "36400.0", "36600.0", "36550.0", "5.123", 87],
+        ],
+        last: 1_699_999_200,
+      },
+    });
+    const { bars } = await client.getOhlc("XBTUSD", 15);
+    expect(bars.length).toBe(1);
+    expect(bars[0]![0]).toBe(1_699_999_200);
+  });
+
+  test("getOhlc throws when two unrelated pair keys make the choice ambiguous", async () => {
+    mockFetch({
+      error: [],
+      result: {
+        ETHUSD: [[1_600_000_000, "1.0", "1.0", "1.0", "1.0", "1.0", "1.0", 1]],
+        SOLUSD: [[1_600_000_900, "2.0", "2.0", "2.0", "2.0", "2.0", "2.0", 1]],
+        last: 1_600_000_900,
+      },
+    });
+    await expect(client.getOhlc("XBTUSD", 15)).rejects.toThrow(
+      "No OHLC data returned for pair: XBTUSD",
+    );
+  });
+
   test("getOhlc passes since param when provided", async () => {
     let capturedUrl = "";
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = mock(
-      async (input: unknown) => {
-        capturedUrl = String(input);
-        return new Response(JSON.stringify(OHLC_FIXTURE), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    );
+    installFetch(async (input) => {
+      capturedUrl = String(input);
+      return new Response(JSON.stringify(OHLC_FIXTURE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
     await client.getOhlc("XBTUSD", 15, 1_699_000_000);
     expect(capturedUrl).toContain("since=1699000000");
     expect(capturedUrl).toContain("interval=15");
@@ -192,9 +237,9 @@ describe("KrakenPublicClient", () => {
   });
 
   test("HTTP error throws with status code in message", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = mock(
-      async () => new Response("", { status: 429, statusText: "Too Many Requests" }),
+    installFetch(
+      async () =>
+        new Response("", { status: 429, statusText: "Too Many Requests" }),
     );
     await expect(client.getServerTime()).rejects.toThrow("HTTP 429");
   });
@@ -205,16 +250,13 @@ describe("KrakenPublicClient", () => {
     const RATE = 50; // 50 ms for test speed
     const testClient = new KrakenPublicClient(RATE);
     let callCount = 0;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = mock(
-      async () => {
-        callCount++;
-        return new Response(JSON.stringify(TIME_FIXTURE), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
-    );
+    installFetch(async () => {
+      callCount++;
+      return new Response(JSON.stringify(TIME_FIXTURE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
 
     const start = Date.now();
     await testClient.getServerTime();
@@ -225,6 +267,60 @@ describe("KrakenPublicClient", () => {
     // Two calls should take at least RATE ms (the delay before the second call).
     expect(elapsed).toBeGreaterThanOrEqual(RATE - 5); // small tolerance
   });
+
+  // ── Request timeout ──
+
+  test("a request that never responds is aborted by the timeout", async () => {
+    installFetch(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new Error("aborted by signal")),
+          );
+        }),
+    );
+    const timingOut = new KrakenPublicClient(0, 20);
+    await expect(timingOut.getServerTime()).rejects.toThrow(
+      "aborted by signal",
+    );
+  });
+
+  test("every endpoint passes an abort signal", async () => {
+    const signals: unknown[] = [];
+    installFetch(async (input, init) => {
+      signals.push(init?.signal);
+      const url = String(input);
+      const body = url.includes("/OHLC")
+        ? OHLC_FIXTURE
+        : url.includes("/AssetPairs")
+          ? ASSET_PAIRS_FIXTURE
+          : TIME_FIXTURE;
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    await client.getServerTime();
+    await client.getAssetPairs(["XBTUSD"]);
+    await client.getOhlc("XBTUSD", 15);
+
+    expect(signals.length).toBe(3);
+    for (const signal of signals) {
+      expect(signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+});
+
+// ── Global state hygiene ──────────────────────────────────────────────────────
+
+/**
+ * Regression guard for the mocked fetch leaking out of the unit tests: the
+ * opt-in live smoke tests below share this module's global scope, so a mock
+ * left installed would answer them with a fixture instead of api.kraken.com.
+ */
+test("global fetch is restored after the mocked unit tests", () => {
+  expect(globalThis.fetch).toBe(ORIGINAL_FETCH);
 });
 
 // ── Optional live smoke test ───────────────────────────────────────────────────

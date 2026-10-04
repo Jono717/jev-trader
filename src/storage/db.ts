@@ -22,9 +22,6 @@ CREATE TABLE IF NOT EXISTS ohlcv_bars (
   count    INTEGER NOT NULL,
   PRIMARY KEY (pair, interval, ts)
 );
-
-CREATE INDEX IF NOT EXISTS idx_ohlcv_pair_interval_ts
-  ON ohlcv_bars (pair, interval, ts);
 `;
 
 /** Open (or create) the SQLite database at `path` and ensure the schema exists. */

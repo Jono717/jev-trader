@@ -12,12 +12,65 @@ import { test, expect, describe } from "bun:test";
 import {
   countMissingBars,
   gapWarning,
+  parseArgs,
   MAX_BARS_PER_REQUEST,
 } from "../scripts/fetch-ohlcv.ts";
 
 const INTERVAL = 15; // minutes
 const STEP = INTERVAL * 60; // seconds
 const STORED_TS = 1_700_000_000;
+
+const KRAKEN_INTERVALS = [1, 5, 15, 30, 60, 240, 1440, 10080, 21600];
+
+describe("parseArgs", () => {
+  test("defaults to BTC/USD 15m in data/ohlcv.sqlite", () => {
+    expect(parseArgs([])).toEqual({
+      pair: "XBTUSD",
+      interval: 15,
+      db: "data/ohlcv.sqlite",
+    });
+  });
+
+  test("reads the documented flags in any order", () => {
+    expect(
+      parseArgs(["--db", "data/eth_1h.sqlite", "--pair", "ETHUSD", "--interval", "60"]),
+    ).toEqual({ pair: "ETHUSD", interval: 60, db: "data/eth_1h.sqlite" });
+  });
+
+  test("rejects a mistyped flag instead of silently fetching the defaults", () => {
+    expect(() => parseArgs(["--pairs", "ETHUSD", "--interval", "60"])).toThrow(
+      "Unknown flag --pairs",
+    );
+  });
+
+  test("rejects a trailing flag with no value", () => {
+    expect(() => parseArgs(["--pair"])).toThrow("Missing value for --pair");
+    expect(() => parseArgs(["--pair", "ETHUSD", "--interval"])).toThrow(
+      "Missing value for --interval",
+    );
+  });
+
+  test("rejects a non-numeric interval rather than storing NaN", () => {
+    expect(() => parseArgs(["--interval", "abc"])).toThrow(
+      "Invalid --interval abc",
+    );
+  });
+
+  test("rejects an interval Kraken does not serve", () => {
+    expect(() => parseArgs(["--interval", "7"])).toThrow("Invalid --interval 7");
+  });
+
+  test("accepts every interval Kraken serves", () => {
+    for (const minutes of KRAKEN_INTERVALS) {
+      expect(parseArgs(["--interval", String(minutes)]).interval).toBe(minutes);
+    }
+  });
+
+  test("rejects an empty pair or db value", () => {
+    expect(() => parseArgs(["--pair", ""])).toThrow("--pair needs");
+    expect(() => parseArgs(["--db", ""])).toThrow("--db needs");
+  });
+});
 
 describe("countMissingBars", () => {
   test("reports no gap when the next bar follows immediately", () => {

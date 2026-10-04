@@ -80,6 +80,10 @@ bun run fetch-ohlcv --pair ETHUSD --interval 60
 bun run fetch-ohlcv --db data/eth_1h.sqlite --pair ETHUSD --interval 60
 ```
 
+Unknown flags, flags given without a value, and intervals Kraken does not
+serve are rejected with a usage error — a typo never falls back to the
+defaults and fetches the wrong series.
+
 **Re-runs are idempotent.** Each run stores the most recent window Kraken will
 serve; existing rows are updated in-place with `INSERT OR REPLACE`, and the
 latest stored bar is re-fetched so a bar that was still forming gets its final

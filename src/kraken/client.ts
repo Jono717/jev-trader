@@ -5,7 +5,9 @@
  * No API keys are read or required — all data is publicly accessible.
  *
  * Rate limiting: Kraken's public tier allows ~1 req/s. The client
- * enforces a configurable minimum interval between requests (default 1 s).
+ * enforces a configurable minimum interval between requests (default 1 s) and
+ * aborts any request that has not responded within a configurable timeout, so
+ * an unattended scheduled run cannot wedge forever on a stalled connection.
  */
 
 import type {
@@ -18,6 +20,7 @@ import type {
 
 const BASE_URL = "https://api.kraken.com";
 const DEFAULT_RATE_LIMIT_MS = 1_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,13 +39,19 @@ export class KrakenError extends Error {
 export class KrakenPublicClient {
   private lastRequestAt = 0;
   private readonly rateLimitMs: number;
+  private readonly timeoutMs: number;
 
   /**
    * @param rateLimitMs Minimum ms between requests (default 1000).
    *                    Pass 0 in tests to skip the delay.
+   * @param timeoutMs   Ms to wait for a response before aborting (default 15000).
    */
-  constructor(rateLimitMs = DEFAULT_RATE_LIMIT_MS) {
+  constructor(
+    rateLimitMs = DEFAULT_RATE_LIMIT_MS,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  ) {
     this.rateLimitMs = rateLimitMs;
+    this.timeoutMs = timeoutMs;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
@@ -54,7 +63,9 @@ export class KrakenPublicClient {
     }
     this.lastRequestAt = Date.now();
 
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}: ${res.statusText} — ${url}`);
     }
@@ -127,17 +138,23 @@ export class KrakenPublicClient {
     const raw = await this.get<KrakenOhlcResult>("/0/public/OHLC", params);
     const last = raw.last;
 
-    // Kraken may return the bars under a different key than requested
-    // (e.g. request "XBTUSD", receive key "XXBTZUSD"). Find any array value.
-    let bars: KrakenOhlcBar[] | undefined;
-    for (const [key, value] of Object.entries(raw)) {
-      if (key !== "last" && Array.isArray(value)) {
-        bars = value as KrakenOhlcBar[];
-        break;
+    // Kraken may return the bars under its internal pair key instead of the
+    // requested one (e.g. request "XBTUSD", receive "XXBTZUSD").
+    const direct = raw[pair];
+    let bars: KrakenOhlcBar[] | undefined = Array.isArray(direct)
+      ? direct
+      : undefined;
+
+    if (bars === undefined) {
+      const barKeys = Object.keys(raw).filter(
+        (key) => key !== "last" && Array.isArray(raw[key]),
+      );
+      if (barKeys.length === 1) {
+        bars = raw[barKeys[0]!] as KrakenOhlcBar[];
       }
     }
 
-    if (!bars) {
+    if (bars === undefined) {
       throw new Error(`No OHLC data returned for pair: ${pair}`);
     }
 

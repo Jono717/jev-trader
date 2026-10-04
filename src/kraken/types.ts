@@ -64,7 +64,7 @@ export type KrakenOhlcBar = [
  * The pair key may differ from what you requested (e.g. "XXBTZUSD" vs "XBTUSD").
  */
 export interface KrakenOhlcResult {
-  /** Timestamp of the last returned bar — pass as `since` to page forward. */
+  /** Cursor Kraken returns for polling newly committed bars. */
   last: number;
   /** Pair bars live under the pair's exchange key (not guaranteed to match request). */
   [pairKey: string]: KrakenOhlcBar[] | number;
