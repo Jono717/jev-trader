@@ -52,6 +52,10 @@ export function parseArgs(argv: string[]): {
 
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i]!;
+    if (flag !== "--pair" && flag !== "--interval" && flag !== "--db") {
+      throw new Error(`Unknown flag ${flag}. ${USAGE}`);
+    }
+
     const val = argv[i + 1];
     if (val === undefined) {
       throw new Error(`Missing value for ${flag}. ${USAGE}`);
@@ -70,13 +74,11 @@ export function parseArgs(argv: string[]): {
         );
       }
       args.interval = interval;
-    } else if (flag === "--db") {
+    } else {
       if (val.length === 0) {
         throw new Error(`--db needs a file path. ${USAGE}`);
       }
       args.db = val;
-    } else {
-      throw new Error(`Unknown flag ${flag}. ${USAGE}`);
     }
   }
 

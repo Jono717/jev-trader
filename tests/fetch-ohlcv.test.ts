@@ -43,11 +43,26 @@ describe("parseArgs", () => {
     );
   });
 
+  test("calls an unrecognised flag unknown even in final position", () => {
+    expect(() => parseArgs(["--pairs"])).toThrow("Unknown flag --pairs");
+    expect(() => parseArgs(["--pair", "ETHUSD", "--pairs"])).toThrow(
+      "Unknown flag --pairs",
+    );
+  });
+
+  test("answers an unsupported --help with the usage line", () => {
+    expect(() => parseArgs(["--help"])).toThrow("Unknown flag --help");
+    expect(() => parseArgs(["--help"])).toThrow(
+      "Usage: bun run fetch-ohlcv [--pair XBTUSD] [--interval 15] [--db data/ohlcv.sqlite]",
+    );
+  });
+
   test("rejects a trailing flag with no value", () => {
     expect(() => parseArgs(["--pair"])).toThrow("Missing value for --pair");
     expect(() => parseArgs(["--pair", "ETHUSD", "--interval"])).toThrow(
       "Missing value for --interval",
     );
+    expect(() => parseArgs(["--db"])).toThrow("Missing value for --db");
   });
 
   test("rejects a non-numeric interval rather than storing NaN", () => {
