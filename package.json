@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "fetch-ohlcv": "bun run scripts/fetch-ohlcv.ts",
+    "backtest": "bun run scripts/backtest.ts",
     "test": "bun test",
     "type-check": "tsc --noEmit"
   },

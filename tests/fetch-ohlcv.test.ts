@@ -10,11 +10,11 @@
 
 import { test, expect, describe } from "bun:test";
 import {
-  countMissingBars,
   gapWarning,
   parseArgs,
   MAX_BARS_PER_REQUEST,
 } from "../scripts/fetch-ohlcv.ts";
+import { countMissingBars } from "../src/storage/db.ts";
 
 const INTERVAL = 15; // minutes
 const STEP = INTERVAL * 60; // seconds
